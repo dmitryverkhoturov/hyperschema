@@ -1,18 +1,22 @@
 //! Windows shell: one window, opens the last scheme, touchpad through
-//! DirectManipulation, frames paced by the shell.
+//! DirectManipulation, frames paced by the shell, editing in `edit.rs`.
 //!
 //! Usage: hyperschema [file.excalidraw(.md)]
 //! Dev:   --bench N | --autobench | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
+//!        --script steps.txt (see script.rs)
 
 #![windows_subsystem = "windows"]
 
 mod dm;
+mod edit;
+mod script;
 
-use hs_core::{bench, excalidraw, wgpu, Engine};
+use hs_core::{bench, wgpu, Engine};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -29,13 +33,14 @@ struct Args {
     vsync: bool,
     high_perf: bool,
     shot: Option<String>,
+    script: Option<String>,
     cam: Option<(f64, f64, f64)>,
 }
 
 fn parse_args() -> Args {
     // The discrete GPU by default: the 2016 Intel OpenGL driver on this
     // laptop crashes (access violation in ig75icd64.dll).
-    let mut a = Args { bench: None, file: None, autobench: false, vsync: false, high_perf: true, shot: None, cam: None };
+    let mut a = Args { bench: None, file: None, autobench: false, vsync: false, high_perf: true, shot: None, script: None, cam: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -44,6 +49,7 @@ fn parse_args() -> Args {
             "--vsync" => a.vsync = true,
             "--gpu" => a.high_perf = it.next().as_deref() != Some("low"),
             "--shot" => a.shot = it.next(),
+            "--script" => a.script = it.next(),
             "--cam" => {
                 let v: Vec<f64> = it.next().unwrap_or_default().split(',').filter_map(|x| x.parse().ok()).collect();
                 if v.len() == 3 {
@@ -75,6 +81,25 @@ fn remember(path: &Path) {
     let _ = std::fs::write(data_dir().join("last.txt"), path.to_string_lossy().as_bytes());
 }
 
+/// Debug trace into %APPDATA%\Hyperschema\debug.log when HS_DEBUG is set.
+pub fn dlog(msg: String) {
+    if std::env::var_os("HS_DEBUG").is_some() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("debug.log")) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
+pub fn write_png(engine: &mut Engine, path: &str) {
+    let (w, h, rgba) = engine.capture();
+    let file = std::fs::File::create(path).expect("create png");
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).expect("write png");
+}
+
 fn log_panics() {
     std::panic::set_hook(Box::new(|info| {
         let _ = std::fs::create_dir_all(data_dir());
@@ -101,27 +126,52 @@ struct State {
     dm: Option<dm::Dm>,
     mods: ModifiersState,
     cursor: PhysicalPosition<f64>,
-    drag: Option<PhysicalPosition<f64>>,
     touchpad_until: Instant,
+    doc: Option<hs_core::doc::Doc>,
+    path: Option<PathBuf>,
+    /// Modification time of the file when we read or wrote it.
+    mtime: Option<SystemTime>,
+    sel: Vec<usize>,
+    mode: edit::Mode,
+    /// Elements drawn by the overlay instead of the indexed scene.
+    hidden: HashSet<usize>,
+    last_press: Option<(Instant, PhysicalPosition<f64>)>,
+    caret_epoch: Instant,
+    shown_dirty: bool,
     auto: Option<AutoBench>,
     frame_interval: Duration,
     last_frame: Instant,
     /// A redraw was requested too early and waits for the next slot.
     pending: bool,
     name: String,
+    script: Option<script::Script>,
 }
 
 impl State {
+    fn move_to(&mut self, position: PhysicalPosition<f64>) {
+        let prev = std::mem::replace(&mut self.cursor, position);
+        if self.panning() {
+            self.engine.pan(position.x - prev.x, position.y - prev.y);
+            self.window.request_redraw();
+        } else if self.drag_to() {
+            self.window.request_redraw();
+        }
+    }
+
     fn set_title(&self) {
         // Set once per file: retitling a window costs a compositor round
         // trip that showed up as 400 ms stalls when done every 0.5 s.
-        self.window.set_title(&format!("{} — Hyperschema", self.name));
+        let mark = if self.shown_dirty { "● " } else { "" };
+        self.window.set_title(&format!("{mark}{} — Hyperschema", self.name));
     }
 
     fn open(&mut self, path: &Path) {
-        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| excalidraw::load_str(&t)) {
-            Ok(scene) => {
-                self.engine.set_scene(scene);
+        if !self.confirm_discard() {
+            return;
+        }
+        match self.load_doc(path) {
+            Ok(()) => {
+                self.engine.fit();
                 self.name = path.file_name().map(|n| n.to_string_lossy().replace(".excalidraw.md", "").replace(".excalidraw", "")).unwrap_or_default();
                 remember(path);
             }
@@ -250,8 +300,17 @@ impl ApplicationHandler for App {
             dm,
             mods: ModifiersState::default(),
             cursor: PhysicalPosition::new(0.0, 0.0),
-            drag: None,
             touchpad_until: Instant::now(),
+            doc: None,
+            path: None,
+            mtime: None,
+            sel: Vec::new(),
+            mode: edit::Mode::Idle,
+            hidden: HashSet::new(),
+            last_press: None,
+            caret_epoch: Instant::now(),
+            shown_dirty: false,
+            script: self.args.script.as_deref().map(script::Script::load),
             auto: None,
             frame_interval,
             last_frame: Instant::now() - Duration::from_secs(1),
@@ -261,6 +320,7 @@ impl ApplicationHandler for App {
 
         if let Some(n) = self.args.bench {
             st.engine.set_scene(bench::generate(n));
+            st.engine.fit();
             st.name = format!("тест {n} блоков");
             st.set_title();
         } else {
@@ -273,12 +333,7 @@ impl ApplicationHandler for App {
             st.engine.cam.s = sc;
         }
         if let Some(path) = &self.args.shot {
-            let (w, h, rgba) = st.engine.capture();
-            let file = std::fs::File::create(path).expect("create png");
-            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
-            enc.set_color(png::ColorType::Rgba);
-            enc.set_depth(png::BitDepth::Eight);
-            enc.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).expect("write png");
+            write_png(&mut st.engine, path);
             el.exit();
             return;
         }
@@ -292,25 +347,31 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(st) = &mut self.state else { return };
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                if st.confirm_discard() {
+                    el.exit();
+                }
+            }
             WindowEvent::Resized(sz) => {
                 st.engine.resize(sz.width, sz.height);
                 st.window.request_redraw();
             }
             WindowEvent::DroppedFile(path) => st.open(&path),
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
-            WindowEvent::CursorMoved { position, .. } => {
-                if let Some(d) = st.drag {
-                    st.engine.pan(position.x - d.x, position.y - d.y);
-                    st.drag = Some(position);
-                    st.window.request_redraw();
-                }
-                st.cursor = position;
-            }
+            WindowEvent::CursorMoved { position, .. } => st.move_to(position),
             WindowEvent::MouseInput { state, button, .. } => {
-                if matches!(button, MouseButton::Left | MouseButton::Middle) {
-                    st.drag = (state == ElementState::Pressed).then_some(st.cursor);
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        // Ask Windows directly: modifier events can lag behind the click.
+                        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_MENU, VK_SHIFT};
+                        let down = |k: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
+                        st.press(st.mods.alt_key() || down(VK_MENU), st.mods.shift_key() || down(VK_SHIFT))
+                    }
+                    (MouseButton::Middle, ElementState::Pressed) => st.mode = edit::Mode::Pan,
+                    (MouseButton::Left | MouseButton::Middle, ElementState::Released) => st.release(),
+                    _ => {}
                 }
+                st.window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Touchpads normally arrive through DirectManipulation; this
@@ -340,10 +401,54 @@ impl ApplicationHandler for App {
                 st.window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                dlog(format!("key {:?} text={:?}", event.logical_key, event.text));
                 let (w, h) = st.engine.size();
                 let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
                 let ctrl = st.mods.control_key();
-                match event.logical_key.as_ref() {
+                let key = event.logical_key.as_ref();
+                // Layout-independent letters for shortcuts (Ctrl+Я is Ctrl+Z).
+                let letter = match &event.physical_key {
+                    winit::keyboard::PhysicalKey::Code(c) => Some(*c),
+                    _ => None,
+                };
+                use winit::keyboard::KeyCode;
+                if st.editing_text() {
+                    match key {
+                        Key::Named(NamedKey::Escape) => st.commit_text(),
+                        Key::Named(NamedKey::Enter) if ctrl => st.commit_text(),
+                        Key::Named(NamedKey::Backspace) => st.type_text("\u{8}"),
+                        Key::Named(NamedKey::Enter) => st.type_text("\n"),
+                        _ if ctrl && letter == Some(KeyCode::KeyS) => {
+                            st.save();
+                        }
+                        _ => {
+                            if let Some(t) = &event.text {
+                                if !ctrl {
+                                    st.type_text(t);
+                                }
+                            }
+                        }
+                    }
+                    st.window.request_redraw();
+                    return;
+                }
+                if ctrl {
+                    match letter {
+                        Some(KeyCode::KeyS) => {
+                            st.save();
+                        }
+                        Some(KeyCode::KeyZ) => st.undo(st.mods.shift_key()),
+                        Some(KeyCode::KeyY) => st.undo(true),
+                        _ => {}
+                    }
+                }
+                match key {
+                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => st.delete_selection(),
+                    Key::Named(NamedKey::Escape) => st.sel.clear(),
+                    Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F2) => st.edit_selected(),
+                    _ => {}
+                }
+                match key {
                     Key::Character("o") | Key::Character("щ") if ctrl => {
                         let pick = rfd::FileDialog::new()
                             .add_filter("Excalidraw", &["excalidraw", "md", "json"])
@@ -353,7 +458,7 @@ impl ApplicationHandler for App {
                             st.open(&p);
                         }
                     }
-                    Key::Named(NamedKey::Home) | Key::Character("f") | Key::Character("а") => st.engine.fit(),
+                    Key::Named(NamedKey::Home) | Key::Character("f") | Key::Character("а") if !ctrl => st.engine.fit(),
                     Key::Character("=") | Key::Character("+") => st.engine.zoom_at(1.25, cx, cy),
                     Key::Character("-") => st.engine.zoom_at(0.8, cx, cy),
                     _ => {}
@@ -378,6 +483,13 @@ impl ApplicationHandler for App {
                     }
                     touchpad_busy = dm.busy();
                 }
+                if st.script.is_some() {
+                    if !st.script_step() {
+                        el.exit();
+                        return;
+                    }
+                    st.window.request_redraw();
+                }
                 let benching = st.step_bench();
                 if !benching && st.auto.is_some() {
                     st.finish_bench();
@@ -386,6 +498,8 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
+                st.refresh_overlay();
+                st.update_title();
                 st.engine.render();
                 let now = Instant::now();
                 if let Some(b) = &mut st.auto {
@@ -408,7 +522,7 @@ impl ApplicationHandler for App {
                     }
                     b.last = Some(now);
                 }
-                if st.auto.is_some() || touchpad_busy {
+                if st.auto.is_some() || touchpad_busy || st.animating() {
                     st.window.request_redraw();
                 }
             }

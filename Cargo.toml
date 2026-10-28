@@ -3,8 +3,10 @@ resolver = "2"
 members = ["core", "desktop", "android"]
 
 [profile.release]
-debug = 1
-lto = "thin"
+# Line tables keep crash backtraces readable; no LTO keeps rebuilds short.
+debug = "line-tables-only"
+lto = false
+incremental = true
 
 [profile.dev]
 opt-level = 1
@@ -13,5 +15,7 @@ opt-level = 3
 
 [profile.android]
 inherits = "release"
+lto = "thin"
+incremental = false
 debug = 0
 strip = true

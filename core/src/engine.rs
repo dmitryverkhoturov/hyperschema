@@ -1,7 +1,7 @@
 //! GPU engine: owns the device/surface, the culled scene buffers and the
 //! camera. The platform shell feeds it input and asks for frames.
 
-use crate::scene::{Scene, Shape};
+use crate::scene::{Label, Scene};
 use crate::spatial::{reorder, Index};
 use crate::text::{Text, ATLAS, LINE_H};
 use bytemuck::{Pod, Zeroable};
@@ -74,6 +74,55 @@ fn split(v: f64) -> (f32, f32) {
     (hi, (v - hi as f64) as f32)
 }
 
+fn rect_gpu(r: &crate::scene::Rect) -> RectGpu {
+    RectGpu {
+        xywh: [r.x, r.y, r.w, r.h],
+        fill: r.fill,
+        stroke: r.stroke,
+        shape: r.shape as u32 | (r.radius.clamp(0.0, 16_000_000.0) as u32) << 8,
+        sw: r.stroke_w,
+    }
+}
+
+/// One instance per segment plus one per arrowhead.
+fn push_line(out: &mut Vec<LineGpu>, l: &crate::scene::Line) {
+    out.push(LineGpu { pts: [l.x0, l.y0, l.x1, l.y1], color: l.color, width: l.width, kind: 0, _pad: 0 });
+    if l.head {
+        let (dx, dy) = (l.x1 - l.x0, l.y1 - l.y0);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+        let hl = (len * 0.4).min(10.0 + 4.0 * l.width);
+        let back = [l.x1 - dx / len * hl, l.y1 - dy / len * hl];
+        out.push(LineGpu { pts: [back[0], back[1], l.x1, l.y1], color: l.color, width: l.width, kind: 1, _pad: 0 });
+    }
+}
+
+/// A small per-frame vertex buffer that grows as needed.
+#[derive(Default)]
+struct DynBuf {
+    buf: Option<wgpu::Buffer>,
+    cap: usize,
+    count: u32,
+}
+
+impl DynBuf {
+    fn write<T: Pod>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &[T]) {
+        let bytes = std::mem::size_of_val(data);
+        if bytes > self.cap {
+            self.cap = (bytes * 2).max(4096);
+            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("overlay"),
+                size: self.cap as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if let (Some(b), false) = (&self.buf, data.is_empty()) {
+            queue.write_buffer(b, 0, bytemuck::cast_slice(data));
+        }
+        self.count = data.len() as u32;
+    }
+}
+
 fn intersects(a: &[f32; 4], b: &[f32; 4]) -> bool {
     a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]
 }
@@ -107,6 +156,10 @@ pub struct Engine {
     prepared: Option<([f32; 4], f64)>,
     ranges: Vec<(u32, u32)>,
     glyphs: Vec<GlyphGpu>,
+    /// Drawn on top of the scene: selection, things being dragged or typed.
+    ov_rects: DynBuf,
+    ov_lines: DynBuf,
+    ov_glyphs: DynBuf,
 
     pub cam: Camera,
     pub stats: Stats,
@@ -326,6 +379,9 @@ impl Engine {
             prepared: None,
             ranges: Vec::new(),
             glyphs: Vec::new(),
+            ov_rects: DynBuf::default(),
+            ov_lines: DynBuf::default(),
+            ov_glyphs: DynBuf::default(),
             cam: Camera { cx: 0.0, cy: 0.0, s: 1.0 },
             stats: Stats::default(),
             adapter_info,
@@ -340,20 +396,7 @@ impl Engine {
         let (perm, idx) = Index::build(&bb, &sz);
         reorder(&mut scene.rects, &perm);
         let sz: Vec<f32> = perm.iter().map(|&i| sz[i as usize]).collect();
-        let rects: Vec<RectGpu> = scene
-            .rects
-            .iter()
-            .map(|r| {
-                let stroke = if r.shape == Shape::Frame { r.stroke } else { r.stroke };
-                RectGpu {
-                    xywh: [r.x, r.y, r.w, r.h],
-                    fill: r.fill,
-                    stroke,
-                    shape: r.shape as u32 | (r.radius.clamp(0.0, 16_000_000.0) as u32) << 8,
-                    sw: r.stroke_w,
-                }
-            })
-            .collect();
+        let rects: Vec<RectGpu> = scene.rects.iter().map(rect_gpu).collect();
         let mut med: Vec<f32> = sz.clone();
         med.sort_by(|a, b| a.partial_cmp(b).unwrap());
         self.rect_median = med.get(med.len() / 2).copied().unwrap_or(1.0);
@@ -384,14 +427,7 @@ impl Engine {
         // Lines: one instance per segment plus one per arrowhead.
         let mut lines: Vec<LineGpu> = Vec::with_capacity(scene.lines.len() * 2);
         for l in &scene.lines {
-            lines.push(LineGpu { pts: [l.x0, l.y0, l.x1, l.y1], color: l.color, width: l.width, kind: 0, _pad: 0 });
-            if l.head {
-                let (dx, dy) = (l.x1 - l.x0, l.y1 - l.y0);
-                let len = (dx * dx + dy * dy).sqrt().max(1e-6);
-                let hl = (len * 0.4).min(10.0 + 4.0 * l.width);
-                let back = [l.x1 - dx / len * hl, l.y1 - dy / len * hl];
-                lines.push(LineGpu { pts: [back[0], back[1], l.x1, l.y1], color: l.color, width: l.width, kind: 1, _pad: 0 });
-            }
+            push_line(&mut lines, l);
         }
         // Group by length class (powers of two) so far zoom can skip every
         // class that is too short to see without touching its instances.
@@ -444,8 +480,79 @@ impl Engine {
 
         self.scene = scene;
         self.prepared = None;
-        self.text.clear_atlas();
-        self.fit();
+        self.text.clear_layouts();
+    }
+
+    /// Replaces the overlay. Sizes are in world units, so call it again
+    /// after zooming if it holds screen-sized things like outlines.
+    pub fn set_overlay(&mut self, ov: &Scene) {
+        let rects: Vec<RectGpu> = ov.rects.iter().map(rect_gpu).collect();
+        let mut lines = Vec::new();
+        for l in &ov.lines {
+            push_line(&mut lines, l);
+        }
+        let mut glyphs = Vec::new();
+        for label in &ov.labels {
+            self.label_glyphs(label, &mut glyphs);
+        }
+        self.upload_atlas();
+        self.ov_rects.write(&self.device, &self.queue, &rects);
+        self.ov_lines.write(&self.device, &self.queue, &lines);
+        self.ov_glyphs.write(&self.device, &self.queue, &glyphs);
+    }
+
+    fn label_glyphs(&mut self, label: &Label, out: &mut Vec<GlyphGpu>) {
+        let px = label.size * self.cam.s as f32;
+        if px < 1.0 {
+            return;
+        }
+        let bucket = Text::bucket_for(px);
+        let ratio = label.size / crate::text::BUCKETS[bucket as usize];
+        let baseline = self.text.baseline();
+        for (g, gx, line) in self.text.make_layout(label).glyphs {
+            if let Ok(Some(ag)) = self.text.glyph(g, bucket) {
+                out.push(GlyphGpu {
+                    xywh: [
+                        label.x + gx * label.size + ag.min[0] * ratio,
+                        label.y + (line as f32 * LINE_H + baseline) * label.size + ag.min[1] * ratio,
+                        ag.size[0] * ratio,
+                        ag.size[1] * ratio,
+                    ],
+                    uv: ag.uv,
+                    color: label.color,
+                    _pad: [0; 3],
+                });
+            }
+        }
+    }
+
+    /// Size of `text` at font `size` in world units, laid out like a label.
+    pub fn measure(&self, text: &str, size: f32) -> (f32, f32) {
+        let (w, n) = self.text.measure(text);
+        (w * size, n as f32 * LINE_H * size)
+    }
+
+    pub fn screen_to_world(&self, x: f64, y: f64) -> (f64, f64) {
+        let (hw, hh) = (self.config.width as f64 * 0.5, self.config.height as f64 * 0.5);
+        (self.cam.cx + (x - hw) / self.cam.s, self.cam.cy + (y - hh) / self.cam.s)
+    }
+
+    fn upload_atlas(&mut self) {
+        if let Some((y0, y1)) = self.text.dirty.take() {
+            let start = (y0 * ATLAS) as usize;
+            let end = (y1.min(ATLAS) * ATLAS) as usize;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.atlas_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &self.text.pixels[start..end],
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS), rows_per_image: None },
+                wgpu::Extent3d { width: ATLAS, height: y1.min(ATLAS) - y0, depth_or_array_layers: 1 },
+            );
+        }
     }
 
     pub fn scene(&self) -> &Scene {
@@ -537,7 +644,7 @@ impl Engine {
         let region = [view[0] - vw * 0.5, view[1] - vh * 0.5, view[2] + vw * 0.5, view[3] + vh * 0.5];
         let s = self.cam.s as f32;
         let mut ranges = std::mem::take(&mut self.ranges);
-        self.label_idx.query(&region, 0.6 / s, &mut ranges);
+        self.label_idx.query(&region, 0.25 / s, &mut ranges);
         let baseline = self.text.baseline();
         let mut scratch = Vec::new();
         for attempt in 0..2 {
@@ -550,11 +657,11 @@ impl Engine {
                     }
                     let label = &self.scene.labels[i as usize];
                     let px = label.size * s;
-                    if px < 0.6 {
+                    if px < 0.25 {
                         continue;
                     }
                     let mut color = label.color;
-                    if px < 4.0 {
+                    if px < 2.0 {
                         // Too small to read: one soft bar per line.
                         if self.glyphs.len() > 400_000 {
                             continue;
@@ -631,21 +738,7 @@ impl Engine {
             self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.glyphs));
         }
         self.glyph_count = self.glyphs.len() as u32;
-        if let Some((y0, y1)) = self.text.dirty.take() {
-            let start = (y0 * ATLAS) as usize;
-            let end = (y1.min(ATLAS) * ATLAS) as usize;
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.text.pixels[start..end],
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS), rows_per_image: None },
-                wgpu::Extent3d { width: ATLAS, height: y1.min(ATLAS) - y0, depth_or_array_layers: 1 },
-            );
-        }
+        self.upload_atlas();
         self.prepared = Some((region, self.cam.s));
         self.stats.text_ms = t0.elapsed().as_secs_f32() * 1000.0;
     }
@@ -736,7 +829,7 @@ impl Engine {
         // well under a pixel (each sample then stands for 8^k shapes).
         let px = self.rect_median as f64 * self.cam.s;
         let mut lod = 0usize;
-        let mut lim = 0.8;
+        let mut lim = 0.3;
         while lod + 1 < self.rect_lods.len() && px < lim {
             lod += 1;
             lim /= 2.83;
@@ -793,10 +886,10 @@ impl Engine {
                 pass.set_pipeline(&self.line_pipe);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 for (max_len, idx, base) in &self.line_classes {
-                    if max_len * s < 2.0 {
+                    if max_len * s < 0.5 {
                         continue;
                     }
-                    idx.query(&view, 2.0 / s, &mut self.ranges);
+                    idx.query(&view, 0.5 / s, &mut self.ranges);
                     for &(a, b) in &self.ranges {
                         pass.draw(0..6, a + base..b + base);
                         nl += b - a;
@@ -810,6 +903,22 @@ impl Engine {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..6, 0..self.glyph_count);
                 draws += 1;
+            }
+            if let (Some(buf), true) = (&self.ov_rects.buf, self.ov_rects.count > 0) {
+                pass.set_pipeline(&self.rect_pipe);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..self.ov_rects.count);
+            }
+            if let (Some(buf), true) = (&self.ov_lines.buf, self.ov_lines.count > 0) {
+                pass.set_pipeline(&self.line_pipe);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..self.ov_lines.count);
+            }
+            if let (Some(buf), true) = (&self.ov_glyphs.buf, self.ov_glyphs.count > 0) {
+                pass.set_pipeline(&self.glyph_pipe);
+                pass.set_bind_group(1, &self.atlas_bg, &[]);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..self.ov_glyphs.count);
             }
         }
         self.stats.rects = nr;

@@ -46,6 +46,7 @@ pub extern "system" fn Java_com_hyperschema_app_Native_create(env: JNIEnv, _c: J
     let font = FONTS.iter().find_map(|p| std::fs::read(p).ok()).expect("no system font");
     let mut engine = pollster::block_on(Engine::new(&instance, sf, w as u32, h as u32, font, true));
     engine.set_scene(bench::generate(boxes.max(1) as usize));
+    engine.fit();
     Box::into_raw(Box::new(App { instance, engine, _window: window })) as jlong
 }
 
@@ -98,6 +99,7 @@ pub extern "system" fn Java_com_hyperschema_app_Native_load(mut env: JNIEnv, _c:
     match excalidraw::load_str(&text) {
         Ok(scene) => {
             app(h).engine.set_scene(scene);
+            app(h).engine.fit();
             std::ptr::null_mut()
         }
         Err(e) => env.new_string(e).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()),

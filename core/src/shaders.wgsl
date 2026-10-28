@@ -54,8 +54,8 @@ fn vs_rect(@builtin(vertex_index) vi: u32, r: RectIn) -> RectOut {
     let real = r.xywh.zw * 0.5 * s;
     let half = max(real, vec2<f32>(0.5));
     let c = to_screen(r.xywh.xy + r.xywh.zw * 0.5);
-    let big = min(real.x, real.y) > 2.0;
-    let sw = select(0.0, max(r.sw * s, 1.0), big && (r.stroke >> 24u) > 0u);
+    // Outlines stay visible down to a pixel: most schemes are stroke-only boxes.
+    let sw = select(0.0, max(r.sw * s, 1.0), (r.stroke >> 24u) > 0u);
     let pad = 1.0 + sw;
     let local = corner(vi) * (half + pad);
     var o: RectOut;
@@ -137,7 +137,7 @@ fn vs_line(@builtin(vertex_index) vi: u32, l: LineIn) -> LineOut {
     var o: LineOut;
     o.pos = to_clip(p);
     // Too short to read: collapse the quad, nothing gets rasterised.
-    if ((l.kind == 0u && len < 2.0) || (l.kind == 1u && len < 3.0)) {
+    if ((l.kind == 0u && len < 0.5) || (l.kind == 1u && len < 1.5)) {
         o.pos = vec4<f32>(2.0, 2.0, 0.0, 1.0);
     }
     o.uv = vec2<f32>(along, across);

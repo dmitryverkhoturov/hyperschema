@@ -10,8 +10,16 @@ pub fn load_str(text: &str) -> Result<Scene, String> {
     let els = v["elements"].as_array().ok_or("no elements")?;
     let mut scene = Scene::default();
     for e in els {
+        element_into(e, &mut scene);
+    }
+    Ok(scene)
+}
+
+/// Appends the drawable parts of one Excalidraw element to `scene`.
+pub fn element_into(e: &Value, scene: &mut Scene) {
+    {
         if e["isDeleted"].as_bool().unwrap_or(false) {
-            continue;
+            return;
         }
         let f = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
         let (x, y, w, h) = (f("x"), f("y"), f("width"), f("height"));
@@ -64,7 +72,7 @@ pub fn load_str(text: &str) -> Result<Scene, String> {
                 });
             }
             t @ ("arrow" | "line" | "freedraw") => {
-                let Some(pts) = e["points"].as_array() else { continue };
+                let Some(pts) = e["points"].as_array() else { return };
                 let pts: Vec<(f32, f32)> = pts
                     .iter()
                     .filter_map(|p| Some((x + p[0].as_f64()? as f32, y + p[1].as_f64()? as f32)))
@@ -80,10 +88,9 @@ pub fn load_str(text: &str) -> Result<Scene, String> {
             _ => {}
         }
     }
-    Ok(scene)
 }
 
-fn extract_json(text: &str) -> Result<String, String> {
+pub(crate) fn extract_json(text: &str) -> Result<String, String> {
     if let Some(rest) = text.split("```compressed-json").nth(1) {
         let body: String = rest.split("```").next().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
         let wide = lz_str::decompress_from_base64(&body).ok_or("bad compressed-json")?;

@@ -2,6 +2,7 @@
 //! Platform shells (Windows, Android, ...) own the window and input.
 
 pub mod bench;
+pub mod doc;
 pub mod engine;
 pub mod excalidraw;
 pub mod scene;

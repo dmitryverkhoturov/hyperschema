@@ -93,7 +93,19 @@ impl Text {
         &self.layouts[&idx]
     }
 
-    fn make_layout(&self, label: &Label) -> Layout {
+    /// Drops cached layouts (label indices change when the scene does).
+    pub fn clear_layouts(&mut self) {
+        self.layouts.clear();
+    }
+
+    /// Width of the widest line and the line count, in em.
+    pub fn measure(&self, text: &str) -> (f32, usize) {
+        let s = self.font.as_scaled(PxScale::from(1.0));
+        let w = text.split('\n').map(|l| l.chars().map(|c| s.h_advance(self.font.glyph_id(c))).sum::<f32>()).fold(0.0, f32::max);
+        (w, text.split('\n').count())
+    }
+
+    pub fn make_layout(&self, label: &Label) -> Layout {
         let s = self.font.as_scaled(PxScale::from(1.0));
         let wrap_em = if label.wrap && label.w > 0.0 { label.w / label.size } else { f32::MAX };
         let box_em = label.w / label.size;
