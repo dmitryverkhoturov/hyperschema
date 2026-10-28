@@ -7,3 +7,4 @@ shell-android/.gradle/
 shell-android/app/build/
 shell-android/build/
 shell-android/local.properties
+roundtrip-out.md
