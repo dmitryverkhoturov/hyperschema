@@ -173,7 +173,9 @@ impl State {
             Ok(()) => {
                 self.engine.fit();
                 self.name = path.file_name().map(|n| n.to_string_lossy().replace(".excalidraw.md", "").replace(".excalidraw", "")).unwrap_or_default();
-                remember(path);
+                if self.script.is_none() {
+                    remember(path);
+                }
             }
             Err(e) => self.name = format!("не открылось: {e}"),
         }
