@@ -2,3 +2,8 @@ target/
 bench-result.txt
 bench-frames.csv
 *.png
+shell-android/app/src/main/jniLibs/
+shell-android/.gradle/
+shell-android/app/build/
+shell-android/build/
+shell-android/local.properties

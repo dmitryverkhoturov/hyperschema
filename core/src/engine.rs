@@ -81,7 +81,7 @@ fn intersects(a: &[f32; 4], b: &[f32; 4]) -> bool {
 pub struct Engine {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     rect_pipe: wgpu::RenderPipeline,
     line_pipe: wgpu::RenderPipeline,
@@ -155,7 +155,7 @@ impl Engine {
         config.format = config.format.remove_srgb_suffix();
         config.view_formats = vec![];
         config.present_mode = wgpu::PresentMode::AutoVsync;
-        config.desired_maximum_frame_latency = std::env::var("HS_LATENCY").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+        config.desired_maximum_frame_latency = std::env::var("HS_LATENCY").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -303,7 +303,7 @@ impl Engine {
         Engine {
             device,
             queue,
-            surface,
+            surface: Some(surface),
             config,
             rect_pipe,
             line_pipe,
@@ -462,13 +462,27 @@ impl Engine {
         }
         self.config.width = w;
         self.config.height = h;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(sf) = &self.surface {
+            sf.configure(&self.device, &self.config);
+        }
         self.prepared = None;
+    }
+
+    /// Android: the window goes away when the app is backgrounded.
+    pub fn detach_surface(&mut self) {
+        self.surface = None;
+    }
+
+    pub fn attach_surface(&mut self, surface: wgpu::Surface<'static>, w: u32, h: u32) {
+        self.surface = Some(surface);
+        self.resize(w, h);
     }
 
     pub fn set_vsync(&mut self, on: bool) {
         self.config.present_mode = if on { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
-        self.surface.configure(&self.device, &self.config);
+        if let Some(sf) = &self.surface {
+            sf.configure(&self.device, &self.config);
+        }
     }
 
     pub fn fit(&mut self) {
@@ -645,10 +659,11 @@ impl Engine {
         }
         self.write_camera();
 
-        let frame = match self.surface.get_current_texture() {
+        let Some(sf) = &self.surface else { return false };
+        let frame = match sf.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                sf.configure(&self.device, &self.config);
                 return false;
             }
             _ => return false,

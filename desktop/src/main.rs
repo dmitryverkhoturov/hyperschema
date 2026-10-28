@@ -1,9 +1,16 @@
-//! Windows shell (winit window for now): input mapping, window title HUD
-//! and a scripted benchmark.
+//! Windows shell: one window, opens the last scheme, touchpad through
+//! DirectManipulation, frames paced by the shell.
 //!
-//! Usage: hyperschema [--bench N] [--autobench] [--vsync] [--gpu high] [--shot out.png [--cam x,y,scale]] [file.excalidraw(.md)]
+//! Usage: hyperschema [file.excalidraw(.md)]
+//! Dev:   --bench N | --autobench | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
+
+#![windows_subsystem = "windows"]
+
+mod dm;
 
 use hs_core::{bench, excalidraw, wgpu, Engine};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -13,27 +20,29 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+const DEFAULT_SCHEME: &str = "board.excalidraw.md";
+
 struct Args {
-    bench: usize,
-    file: Option<String>,
+    bench: Option<usize>,
+    file: Option<PathBuf>,
     autobench: bool,
     vsync: bool,
     high_perf: bool,
-    /// Off-screen capture: save PNG and exit.
     shot: Option<String>,
-    /// Camera for the capture: centre x, centre y, scale (or fit if absent).
     cam: Option<(f64, f64, f64)>,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { bench: 500_000, file: None, autobench: false, vsync: false, high_perf: false, shot: None, cam: None };
+    // The discrete GPU by default: the 2016 Intel OpenGL driver on this
+    // laptop crashes (access violation in ig75icd64.dll).
+    let mut a = Args { bench: None, file: None, autobench: false, vsync: false, high_perf: true, shot: None, cam: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
-            "--bench" => a.bench = it.next().and_then(|v| v.parse().ok()).unwrap_or(500_000),
+            "--bench" => a.bench = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or(500_000)),
             "--autobench" => a.autobench = true,
             "--vsync" => a.vsync = true,
-            "--gpu" => a.high_perf = it.next().as_deref() == Some("high"),
+            "--gpu" => a.high_perf = it.next().as_deref() != Some("low"),
             "--shot" => a.shot = it.next(),
             "--cam" => {
                 let v: Vec<f64> = it.next().unwrap_or_default().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -41,10 +50,36 @@ fn parse_args() -> Args {
                     a.cam = Some((v[0], v[1], v[2]));
                 }
             }
-            _ => a.file = Some(s),
+            _ => a.file = Some(PathBuf::from(s)),
         }
     }
+    if a.autobench && a.bench.is_none() && a.file.is_none() {
+        a.bench = Some(500_000);
+    }
     a
+}
+
+fn data_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    base.join("Hyperschema")
+}
+
+fn last_file() -> Option<PathBuf> {
+    let p = std::fs::read_to_string(data_dir().join("last.txt")).ok()?;
+    let p = PathBuf::from(p.trim());
+    p.exists().then_some(p)
+}
+
+fn remember(path: &Path) {
+    let _ = std::fs::create_dir_all(data_dir());
+    let _ = std::fs::write(data_dir().join("last.txt"), path.to_string_lossy().as_bytes());
+}
+
+fn log_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        let _ = std::fs::create_dir_all(data_dir());
+        let _ = std::fs::write(data_dir().join("crash.log"), format!("{info}\n{}", std::backtrace::Backtrace::force_capture()));
+    }));
 }
 
 /// Scripted camera flight: overview -> deep zoom -> pan -> back out.
@@ -63,28 +98,37 @@ const BENCH_SECS: f64 = 12.0;
 struct State {
     window: Arc<Window>,
     engine: Engine,
+    dm: Option<dm::Dm>,
     mods: ModifiersState,
     cursor: PhysicalPosition<f64>,
     drag: Option<PhysicalPosition<f64>>,
     touchpad_until: Instant,
-    frames: u32,
-    fps_t: Instant,
-    fps: f32,
-    title_base: String,
     auto: Option<AutoBench>,
     frame_interval: Duration,
     last_frame: Instant,
     /// A redraw was requested too early and waits for the next slot.
     pending: bool,
+    name: String,
 }
 
 impl State {
-    fn update_title(&self) {
-        let s = self.engine.stats;
-        self.window.set_title(&format!(
-            "{} | {:.0} fps | кадр {:.1} мс | текст {:.1} мс | видно: {} фигур, {} линий, {} глифов | зум {:.4}",
-            self.title_base, self.fps, s.frame_ms, s.text_ms, s.rects, s.lines, s.glyphs, self.engine.cam.s
-        ));
+    fn set_title(&self) {
+        // Set once per file: retitling a window costs a compositor round
+        // trip that showed up as 400 ms stalls when done every 0.5 s.
+        self.window.set_title(&format!("{} — Hyperschema", self.name));
+    }
+
+    fn open(&mut self, path: &Path) {
+        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| excalidraw::load_str(&t)) {
+            Ok(scene) => {
+                self.engine.set_scene(scene);
+                self.name = path.file_name().map(|n| n.to_string_lossy().replace(".excalidraw.md", "").replace(".excalidraw", "")).unwrap_or_default();
+                remember(path);
+            }
+            Err(e) => self.name = format!("не открылось: {e}"),
+        }
+        self.set_title();
+        self.window.request_redraw();
     }
 
     fn start_bench(&mut self) {
@@ -141,8 +185,10 @@ impl State {
         let cpu_max = b.cpu.iter().cloned().fold(0.0, f32::max);
         let text_max = b.text.iter().cloned().fold(0.0, f32::max);
         let report = format!(
-            "{}\nкадров {}, средний интервал {:.2} мс ({:.1} fps), p50 {:.2}, p95 {:.2}, p99 {:.2}, max {:.2} мс\nкадров >20 мс: {} ({:.1}%)\nCPU на кадр: среднее {:.2} мс, max {:.2} мс; пересборка текста max {:.2} мс\n",
-            self.title_base,
+            "{} — {} элементов — {}\nкадров {}, средний интервал {:.2} мс ({:.1} fps), p50 {:.2}, p95 {:.2}, p99 {:.2}, max {:.2} мс\nкадров >20 мс: {} ({:.1}%)\nCPU на кадр: среднее {:.2} мс, max {:.2} мс; пересборка текста max {:.2} мс\n",
+            self.name,
+            self.engine.scene().element_count(),
+            self.engine.adapter_info,
             n,
             avg,
             1000.0 / avg,
@@ -156,11 +202,8 @@ impl State {
             cpu_max,
             text_max
         );
-        println!("{report}");
         let _ = std::fs::write("bench-result.txt", &report);
-        let _ = std::fs::write("bench-frames.csv", format!("t,interval,scale,rects,lines,glyphs,cpu,text
-{}", b.rows.join("
-")));
+        let _ = std::fs::write("bench-frames.csv", format!("t,interval,scale,rects,lines,glyphs,cpu,text\n{}", b.rows.join("\n")));
     }
 }
 
@@ -196,54 +239,52 @@ impl ApplicationHandler for App {
         engine.set_vsync(self.args.vsync);
         let refresh = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).unwrap_or(60_000);
         let frame_interval = Duration::from_micros(1_000_000_000 / refresh as u64);
-        let t = Instant::now();
-        let (scene, name) = match &self.args.file {
-            Some(path) => {
-                let text = std::fs::read_to_string(path).expect("read file");
-                (excalidraw::load_str(&text).expect("parse"), path.rsplit(['/', '\\']).next().unwrap_or(path).to_string())
-            }
-            None => (bench::generate(self.args.bench), format!("тест {} блоков", self.args.bench)),
+
+        let dm = match window.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => dm::Dm::new(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _)).ok(),
+            _ => None,
         };
-        let n = scene.element_count();
-        engine.set_scene(scene);
+        let mut st = State {
+            window,
+            engine,
+            dm,
+            mods: ModifiersState::default(),
+            cursor: PhysicalPosition::new(0.0, 0.0),
+            drag: None,
+            touchpad_until: Instant::now(),
+            auto: None,
+            frame_interval,
+            last_frame: Instant::now() - Duration::from_secs(1),
+            pending: false,
+            name: String::new(),
+        };
+
+        if let Some(n) = self.args.bench {
+            st.engine.set_scene(bench::generate(n));
+            st.name = format!("тест {n} блоков");
+            st.set_title();
+        } else {
+            let path = self.args.file.clone().or_else(last_file).unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEME));
+            st.open(&path);
+        }
         if let Some((x, y, sc)) = self.args.cam {
-            engine.cam.cx = x;
-            engine.cam.cy = y;
-            engine.cam.s = sc;
+            st.engine.cam.cx = x;
+            st.engine.cam.cy = y;
+            st.engine.cam.s = sc;
         }
         if let Some(path) = &self.args.shot {
-            let (w, h, rgba) = engine.capture();
+            let (w, h, rgba) = st.engine.capture();
             let file = std::fs::File::create(path).expect("create png");
             let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
             enc.set_color(png::ColorType::Rgba);
             enc.set_depth(png::BitDepth::Eight);
             enc.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).expect("write png");
-            let b = engine.scene().bounds();
-            println!("saved {path} {w}x{h}; bounds {:?}; cam {:?}", b, engine.cam);
             el.exit();
             return;
         }
-        let title_base = format!("Hyperschema — {name}: {n} элементов, загрузка {:.1} с — {}", t.elapsed().as_secs_f32(), engine.adapter_info);
-        let mut st = State {
-            window,
-            engine,
-            mods: ModifiersState::default(),
-            cursor: PhysicalPosition::new(0.0, 0.0),
-            drag: None,
-            touchpad_until: Instant::now(),
-            frames: 0,
-            fps_t: Instant::now(),
-            fps: 0.0,
-            title_base,
-            auto: None,
-            frame_interval,
-            last_frame: Instant::now() - Duration::from_secs(1),
-            pending: false,
-        };
         if self.args.autobench {
             st.start_bench();
         }
-        st.update_title();
         st.window.request_redraw();
         self.state = Some(st);
     }
@@ -256,6 +297,7 @@ impl ApplicationHandler for App {
                 st.engine.resize(sz.width, sz.height);
                 st.window.request_redraw();
             }
+            WindowEvent::DroppedFile(path) => st.open(&path),
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(d) = st.drag {
@@ -271,6 +313,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // Touchpads normally arrive through DirectManipulation; this
+                // is the mouse wheel and a fallback if DM is unavailable.
                 let (x, y) = (st.cursor.x, st.cursor.y);
                 match delta {
                     MouseScrollDelta::PixelDelta(p) => {
@@ -281,16 +325,12 @@ impl ApplicationHandler for App {
                         }
                     }
                     MouseScrollDelta::LineDelta(dx, dy) => {
-                        // Precision touchpads send fractional wheel deltas; a
-                        // mouse sends whole notches. Ctrl+wheel is the pinch.
                         let fractional = dx.fract() != 0.0 || dy.fract() != 0.0 || dx != 0.0;
                         if fractional {
                             st.touchpad_until = Instant::now() + Duration::from_millis(400);
                         }
                         let touchpad = Instant::now() < st.touchpad_until;
-                        if st.mods.control_key() {
-                            st.engine.zoom_at(1.18f64.powf(dy as f64), x, y);
-                        } else if touchpad {
+                        if touchpad && !st.mods.control_key() {
                             st.engine.pan(dx as f64 * 60.0, dy as f64 * 60.0);
                         } else {
                             st.engine.zoom_at(1.18f64.powf(dy as f64), x, y);
@@ -302,11 +342,20 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let (w, h) = st.engine.size();
                 let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+                let ctrl = st.mods.control_key();
                 match event.logical_key.as_ref() {
+                    Key::Character("o") | Key::Character("щ") if ctrl => {
+                        let pick = rfd::FileDialog::new()
+                            .add_filter("Excalidraw", &["excalidraw", "md", "json"])
+                            .set_title("Открыть схему")
+                            .pick_file();
+                        if let Some(p) = pick {
+                            st.open(&p);
+                        }
+                    }
                     Key::Named(NamedKey::Home) | Key::Character("f") | Key::Character("а") => st.engine.fit(),
                     Key::Character("=") | Key::Character("+") => st.engine.zoom_at(1.25, cx, cy),
                     Key::Character("-") => st.engine.zoom_at(0.8, cx, cy),
-                    Key::Character("b") | Key::Character("и") => st.start_bench(),
                     _ => {}
                 }
                 st.window.request_redraw();
@@ -319,6 +368,16 @@ impl ApplicationHandler for App {
                     return;
                 }
                 st.last_frame = Instant::now();
+                let mut touchpad_busy = false;
+                if let Some(dm) = &st.dm {
+                    for g in dm.poll() {
+                        match g {
+                            dm::Gesture::Pan(dx, dy) => st.engine.pan(dx, dy),
+                            dm::Gesture::Zoom(f) => st.engine.zoom_at(f, st.cursor.x, st.cursor.y),
+                        }
+                    }
+                    touchpad_busy = dm.busy();
+                }
                 let benching = st.step_bench();
                 if !benching && st.auto.is_some() {
                     st.finish_bench();
@@ -331,10 +390,10 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 if let Some(b) = &mut st.auto {
                     if let Some(last) = b.last {
-                        b.intervals.push((now - last).as_secs_f32() * 1000.0);
-                        b.cpu.push(st.engine.stats.frame_ms);
-                        b.text.push(st.engine.stats.text_ms);
                         let s = st.engine.stats;
+                        b.intervals.push((now - last).as_secs_f32() * 1000.0);
+                        b.cpu.push(s.frame_ms);
+                        b.text.push(s.text_ms);
                         b.rows.push(format!(
                             "{:.2},{:.2},{:.5},{},{},{},{:.2},{:.2}",
                             b.start.elapsed().as_secs_f32(),
@@ -348,17 +407,9 @@ impl ApplicationHandler for App {
                         ));
                     }
                     b.last = Some(now);
-                    st.window.request_redraw();
                 }
-                st.frames += 1;
-                let dt = st.fps_t.elapsed().as_secs_f32();
-                if dt > 0.5 {
-                    st.fps = st.frames as f32 / dt;
-                    st.frames = 0;
-                    st.fps_t = Instant::now();
-                    if st.auto.is_none() {
-                        st.update_title();
-                    }
+                if st.auto.is_some() || touchpad_busy {
+                    st.window.request_redraw();
                 }
             }
             _ => {}
@@ -379,6 +430,7 @@ impl App {
 }
 
 fn main() {
+    log_panics();
     let el = EventLoop::new().expect("event loop");
     el.set_control_flow(ControlFlow::Wait);
     let mut app = App { args: parse_args(), state: None };

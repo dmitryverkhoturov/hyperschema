@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "desktop"]
+members = ["core", "desktop", "android"]
 
 [profile.release]
 debug = 1
@@ -10,3 +10,8 @@ lto = "thin"
 opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.android]
+inherits = "release"
+debug = 0
+strip = true
