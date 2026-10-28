@@ -1,0 +1,11 @@
+[package]
+name = "hs-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+ab_glyph = "0.2"
+lz-str = "0.2"
+serde_json = "1"
