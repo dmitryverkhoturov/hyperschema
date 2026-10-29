@@ -137,6 +137,9 @@ pub struct Engine {
     glyph_pipe: wgpu::RenderPipeline,
     cam_buf: wgpu::Buffer,
     cam_bg: wgpu::BindGroup,
+    /// Identity camera for the screen-space UI layer.
+    ui_cam_buf: wgpu::Buffer,
+    ui_cam_bg: wgpu::BindGroup,
     atlas_tex: wgpu::Texture,
     atlas_bg: wgpu::BindGroup,
     /// Level 0 = every shape; level k = every 8^k-th, for far zoom.
@@ -160,6 +163,12 @@ pub struct Engine {
     ov_rects: DynBuf,
     ov_lines: DynBuf,
     ov_glyphs: DynBuf,
+    /// Screen-space UI on top of everything, in window pixels.
+    ui_rects: DynBuf,
+    ui_lines: DynBuf,
+    ui_glyphs: DynBuf,
+    /// Canvas background (window clear colour).
+    pub bg: wgpu::Color,
 
     pub cam: Camera,
     pub stats: Stats,
@@ -239,6 +248,17 @@ impl Engine {
             label: None,
             layout: &cam_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: cam_buf.as_entire_binding() }],
+        });
+        let ui_cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui cam"),
+            size: std::mem::size_of::<CamU>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ui_cam_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &cam_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ui_cam_buf.as_entire_binding() }],
         });
 
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -363,6 +383,8 @@ impl Engine {
             glyph_pipe,
             cam_buf,
             cam_bg,
+            ui_cam_buf,
+            ui_cam_bg,
             atlas_tex,
             atlas_bg,
             rect_lods: Vec::new(),
@@ -382,6 +404,10 @@ impl Engine {
             ov_rects: DynBuf::default(),
             ov_lines: DynBuf::default(),
             ov_glyphs: DynBuf::default(),
+            ui_rects: DynBuf::default(),
+            ui_lines: DynBuf::default(),
+            ui_glyphs: DynBuf::default(),
+            bg: BG,
             cam: Camera { cx: 0.0, cy: 0.0, s: 1.0 },
             stats: Stats::default(),
             adapter_info,
@@ -501,8 +527,29 @@ impl Engine {
         self.ov_glyphs.write(&self.device, &self.queue, &glyphs);
     }
 
+    /// Replaces the screen-space UI layer (coordinates in window pixels).
+    pub fn set_ui(&mut self, ui: &Scene) {
+        let rects: Vec<RectGpu> = ui.rects.iter().map(rect_gpu).collect();
+        let mut lines = Vec::new();
+        for l in &ui.lines {
+            push_line(&mut lines, l);
+        }
+        let mut glyphs = Vec::new();
+        for label in &ui.labels {
+            self.glyphs_at_scale(label, 1.0, &mut glyphs);
+        }
+        self.upload_atlas();
+        self.ui_rects.write(&self.device, &self.queue, &rects);
+        self.ui_lines.write(&self.device, &self.queue, &lines);
+        self.ui_glyphs.write(&self.device, &self.queue, &glyphs);
+    }
+
     fn label_glyphs(&mut self, label: &Label, out: &mut Vec<GlyphGpu>) {
-        let px = label.size * self.cam.s as f32;
+        self.glyphs_at_scale(label, self.cam.s as f32, out);
+    }
+
+    fn glyphs_at_scale(&mut self, label: &Label, scale: f32, out: &mut Vec<GlyphGpu>) {
+        let px = label.size * scale;
         if px < 1.0 {
             return;
         }
@@ -530,6 +577,23 @@ impl Engine {
     pub fn measure(&self, text: &str, size: f32) -> (f32, f32) {
         let (w, n) = self.text.measure(text);
         (w * size, n as f32 * LINE_H * size)
+    }
+
+    /// Where a caret after the last character of `label` goes (top of the line).
+    pub fn caret(&self, label: &Label) -> (f32, f32) {
+        let mut l = label.clone();
+        l.text.push('|');
+        match self.text.make_layout(&l).glyphs.last() {
+            Some(&(_, gx, line)) => (l.x + gx * l.size, l.y + line as f32 * LINE_H * l.size),
+            None => (l.x, l.y),
+        }
+    }
+
+    /// Lines `text` takes when word-wrapped to `width` at font `size`.
+    pub fn wrapped_lines(&self, text: &str, size: f32, width: f32) -> usize {
+        let label = Label { x: 0.0, y: 0.0, w: width, size, color: 0, align: crate::scene::Align::Left, wrap: true, text: text.to_string() };
+        let paras = text.split('\n').count();
+        self.text.make_layout(&label).glyphs.last().map_or(paras, |g| g.2 as usize + 1).max(paras)
     }
 
     pub fn screen_to_world(&self, x: f64, y: f64) -> (f64, f64) {
@@ -848,6 +912,9 @@ impl Engine {
             boost: 8f32.powi(self.lod() as i32),
         };
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&cam));
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let ui = CamU { center_hi: [w * 0.5, h * 0.5], center_lo: [0.0, 0.0], viewport: [w, h], scale: 1.0, boost: 1.0 };
+        self.queue.write_buffer(&self.ui_cam_buf, 0, bytemuck::bytes_of(&ui));
     }
 
     fn encode(&mut self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
@@ -863,7 +930,7 @@ impl Engine {
                     view: target,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(BG), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(self.bg), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -919,6 +986,23 @@ impl Engine {
                 pass.set_bind_group(1, &self.atlas_bg, &[]);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..6, 0..self.ov_glyphs.count);
+            }
+            pass.set_bind_group(0, &self.ui_cam_bg, &[]);
+            if let (Some(buf), true) = (&self.ui_rects.buf, self.ui_rects.count > 0) {
+                pass.set_pipeline(&self.rect_pipe);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..self.ui_rects.count);
+            }
+            if let (Some(buf), true) = (&self.ui_lines.buf, self.ui_lines.count > 0) {
+                pass.set_pipeline(&self.line_pipe);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..self.ui_lines.count);
+            }
+            if let (Some(buf), true) = (&self.ui_glyphs.buf, self.ui_glyphs.count > 0) {
+                pass.set_pipeline(&self.glyph_pipe);
+                pass.set_bind_group(1, &self.atlas_bg, &[]);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..self.ui_glyphs.count);
             }
         }
         self.stats.rects = nr;

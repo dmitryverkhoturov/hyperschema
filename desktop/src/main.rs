@@ -1,19 +1,25 @@
-//! Windows shell: one window, opens the last scheme, touchpad through
-//! DirectManipulation, frames paced by the shell, editing in `edit.rs`.
+//! Windows shell: one window with our own title strip (chrome.rs), opens
+//! the last board, touchpad through DirectManipulation, frames paced by
+//! the shell, editing in edit.rs, files and history in store.rs.
 //!
-//! Usage: hyperschema [file.excalidraw(.md)]
+//! Usage: hyperschema [file.hyperschema | file.excalidraw(.md)]
 //! Dev:   --bench N | --autobench | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
 //!        --script steps.txt (see script.rs)
 
 #![windows_subsystem = "windows"]
 
+mod chrome;
 mod dm;
 mod edit;
 mod script;
+mod store;
 
+use hs_core::board::{Board, Change, Snapshot};
+use hs_core::history::History;
+use hs_core::route::Pt;
 use hs_core::{bench, wgpu, Engine};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -65,7 +71,7 @@ fn parse_args() -> Args {
     a
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     base.join("Hyperschema")
 }
@@ -76,9 +82,22 @@ fn last_file() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-fn remember(path: &Path) {
+pub fn remember(path: &Path) {
     let _ = std::fs::create_dir_all(data_dir());
     let _ = std::fs::write(data_dir().join("last.txt"), path.to_string_lossy().as_bytes());
+}
+
+/// Window position and outer size (physical px, not maximised) and maximised flag.
+fn load_placement() -> Option<(i32, i32, u32, u32, bool)> {
+    let t = std::fs::read_to_string(data_dir().join("window.txt")).ok()?;
+    let v: Vec<i64> = t.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    (v.len() == 5 && v[2] > 200 && v[3] > 150).then(|| (v[0] as i32, v[1] as i32, v[2] as u32, v[3] as u32, v[4] != 0))
+}
+
+fn save_placement(st: &State) {
+    let Some((x, y, w, h)) = st.restore else { return };
+    let _ = std::fs::create_dir_all(data_dir());
+    let _ = std::fs::write(data_dir().join("window.txt"), format!("{x} {y} {w} {h} {}", chrome::maximized() as u8));
 }
 
 /// Debug trace into %APPDATA%\Hyperschema\debug.log when HS_DEBUG is set.
@@ -120,81 +139,76 @@ struct AutoBench {
 
 const BENCH_SECS: f64 = 12.0;
 
-struct State {
+pub struct State {
     window: Arc<Window>,
     engine: Engine,
     dm: Option<dm::Dm>,
     mods: ModifiersState,
     cursor: PhysicalPosition<f64>,
+    cursor_in: bool,
     touchpad_until: Instant,
-    doc: Option<hs_core::doc::Doc>,
+
+    board: Board,
     path: Option<PathBuf>,
     /// Modification time of the file when we read or wrote it.
     mtime: Option<SystemTime>,
-    sel: Vec<usize>,
+    name: String,
+    history: Option<History>,
+    routes: HashMap<String, Vec<Pt>>,
+    sel: Vec<String>,
+    sel_edge: Option<String>,
+    /// Concept under the pointer (shows the connect dot).
+    hover: Option<String>,
     mode: edit::Mode,
-    /// Elements drawn by the overlay instead of the indexed scene.
-    hidden: HashSet<usize>,
+    /// Drawn by the overlay instead of the indexed scene.
+    hidden_nodes: HashSet<String>,
+    hidden_edges: HashSet<String>,
     last_press: Option<(Instant, PhysicalPosition<f64>)>,
     caret_epoch: Instant,
-    shown_dirty: bool,
+    undo_stack: Vec<Change>,
+    redo_stack: Vec<Change>,
+    step_base: Option<Snapshot>,
+    unsaved: Vec<Change>,
+    save_at: Option<Instant>,
+    timeline: Option<store::Timeline>,
+
+    script: Option<script::Script>,
+    /// Answer the next popup menu gets in a scripted run.
+    script_choice: Option<i32>,
     auto: Option<AutoBench>,
     frame_interval: Duration,
     last_frame: Instant,
     /// A redraw was requested too early and waits for the next slot.
     pending: bool,
-    name: String,
-    script: Option<script::Script>,
+    /// The window is cloaked until its first frame is drawn.
+    shown: bool,
+    /// Last non-maximised position and size.
+    restore: Option<(i32, i32, u32, u32)>,
 }
 
 impl State {
     fn move_to(&mut self, position: PhysicalPosition<f64>) {
         let prev = std::mem::replace(&mut self.cursor, position);
-        if self.panning() {
-            self.engine.pan(position.x - prev.x, position.y - prev.y);
+        let was_menu = chrome::part_at(prev.x, prev.y) == Some(chrome::Part::Menu);
+        let is_menu = chrome::part_at(position.x, position.y) == Some(chrome::Part::Menu);
+        self.cursor_in = true;
+        if self.timeline.as_ref().is_some_and(|t| t.dragging) {
+            self.timeline_drag();
             self.window.request_redraw();
-        } else if self.drag_to() {
+        } else if self.drag_to(prev) {
+            self.window.request_redraw();
+        } else {
+            self.update_hover();
+        }
+        if was_menu != is_menu {
             self.window.request_redraw();
         }
-    }
-
-    fn set_title(&self) {
-        // Set once per file: retitling a window costs a compositor round
-        // trip that showed up as 400 ms stalls when done every 0.5 s.
-        let mark = if self.shown_dirty { "● " } else { "" };
-        self.window.set_title(&format!("{mark}{} — Hyperschema", self.name));
-    }
-
-    fn open(&mut self, path: &Path) {
-        if !self.confirm_discard() {
-            return;
-        }
-        match self.load_doc(path) {
-            Ok(()) => {
-                self.engine.fit();
-                self.name = path.file_name().map(|n| n.to_string_lossy().replace(".excalidraw.md", "").replace(".excalidraw", "")).unwrap_or_default();
-                if self.script.is_none() {
-                    remember(path);
-                }
-            }
-            Err(e) => self.name = format!("не открылось: {e}"),
-        }
-        self.set_title();
-        self.window.request_redraw();
     }
 
     fn start_bench(&mut self) {
         self.engine.fit();
         let c = self.engine.cam;
-        self.auto = Some(AutoBench {
-            start: Instant::now(),
-            from: (c.cx, c.cy, c.s),
-            last: None,
-            intervals: Vec::new(),
-            cpu: Vec::new(),
-            text: Vec::new(),
-            rows: Vec::new(),
-        });
+        self.auto = Some(AutoBench { start: Instant::now(), from: (c.cx, c.cy, c.s), last: None, intervals: Vec::new(), cpu: Vec::new(), text: Vec::new(), rows: Vec::new() });
     }
 
     /// Advances the scripted camera; returns false when done.
@@ -257,11 +271,25 @@ impl State {
         let _ = std::fs::write("bench-result.txt", &report);
         let _ = std::fs::write("bench-frames.csv", format!("t,interval,scale,rects,lines,glyphs,cpu,text\n{}", b.rows.join("\n")));
     }
+
+    fn quit(&mut self, el: &ActiveEventLoop) {
+        self.commit_text();
+        self.flush();
+        if self.script.is_none() && self.auto.is_none() {
+            save_placement(self);
+        }
+        el.exit();
+    }
 }
 
 struct App {
     args: Args,
     state: Option<State>,
+}
+
+fn window_icon() -> Option<winit::window::Icon> {
+    use winit::platform::windows::IconExtWindows;
+    winit::window::Icon::from_resource(1, None).ok()
 }
 
 impl ApplicationHandler for App {
@@ -277,11 +305,40 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
-        let window = Arc::new(
-            el.create_window(Window::default_attributes().with_title("Hyperschema").with_inner_size(LogicalSize::new(1280, 800)))
-                .expect("window"),
-        );
+        // Hidden until the first frame: no small window growing, no white
+        // or black flashes while the swapchain catches up.
+        let mut attrs = Window::default_attributes().with_title("Hyperschema").with_visible(false).with_window_icon(window_icon());
+        let place = load_placement().filter(|&(x, y, w, _, _)| {
+            el.available_monitors().any(|m| {
+                let (p, s) = (m.position(), m.size());
+                x + (w as i32) / 2 >= p.x && x + (w as i32) / 2 < p.x + s.width as i32 && y + 20 >= p.y && y + 20 < p.y + s.height as i32
+            })
+        });
+        attrs = attrs.with_inner_size(LogicalSize::new(1280, 800));
+        let window = Arc::new(el.create_window(attrs).expect("window"));
+        let hwnd = match window.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _)),
+            _ => None,
+        };
+        if let Some(h) = hwnd {
+            chrome::install(h);
+            chrome::cloak(true);
+            // Outer size: our client area includes the caption, so an inner
+            // size would grow by a caption height on every launch.
+            if let Some((x, y, w, hh, _)) = place {
+                chrome::place(x, y, w, hh);
+            }
+        }
+        let restore = window.outer_position().ok().map(|p| {
+            let s = window.outer_size();
+            (p.x, p.y, s.width, s.height)
+        });
+        window.set_visible(true);
+        if place.is_some_and(|p| p.4) {
+            window.set_maximized(true);
+        }
         let size = window.inner_size();
+        chrome::set_metrics(window.scale_factor(), size.width);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window.clone()).expect("surface");
         let font = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf").expect("font");
@@ -291,40 +348,49 @@ impl ApplicationHandler for App {
         engine.set_vsync(self.args.vsync);
         let refresh = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).unwrap_or(60_000);
         let frame_interval = Duration::from_micros(1_000_000_000 / refresh as u64);
-
-        let dm = match window.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Win32(h)) => dm::Dm::new(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _)).ok(),
-            _ => None,
-        };
+        let dm = hwnd.and_then(|h| dm::Dm::new(h).ok());
         let mut st = State {
             window,
             engine,
             dm,
             mods: ModifiersState::default(),
-            cursor: PhysicalPosition::new(0.0, 0.0),
+            cursor: PhysicalPosition::new(-1.0, -1.0),
+            cursor_in: false,
             touchpad_until: Instant::now(),
-            doc: None,
+            board: Board::new(),
             path: None,
             mtime: None,
+            name: String::new(),
+            history: None,
+            routes: HashMap::new(),
             sel: Vec::new(),
+            sel_edge: None,
+            hover: None,
             mode: edit::Mode::Idle,
-            hidden: HashSet::new(),
+            hidden_nodes: HashSet::new(),
+            hidden_edges: HashSet::new(),
             last_press: None,
             caret_epoch: Instant::now(),
-            shown_dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            step_base: None,
+            unsaved: Vec::new(),
+            save_at: None,
+            timeline: None,
             script: self.args.script.as_deref().map(script::Script::load),
+            script_choice: None,
             auto: None,
             frame_interval,
             last_frame: Instant::now() - Duration::from_secs(1),
             pending: false,
-            name: String::new(),
+            shown: false,
+            restore,
         };
 
         if let Some(n) = self.args.bench {
             st.engine.set_scene(bench::generate(n));
             st.engine.fit();
             st.name = format!("тест {n} блоков");
-            st.set_title();
         } else {
             let path = self.args.file.clone().or_else(last_file).unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEME));
             st.open(&path);
@@ -335,6 +401,7 @@ impl ApplicationHandler for App {
             st.engine.cam.s = sc;
         }
         if let Some(path) = &self.args.shot {
+            st.refresh_overlay();
             write_png(&mut st.engine, path);
             el.exit();
             return;
@@ -349,28 +416,54 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(st) = &mut self.state else { return };
         match event {
-            WindowEvent::CloseRequested => {
-                if st.confirm_discard() {
-                    el.exit();
-                }
-            }
+            WindowEvent::CloseRequested => st.quit(el),
             WindowEvent::Resized(sz) => {
                 st.engine.resize(sz.width, sz.height);
+                chrome::set_metrics(st.window.scale_factor(), sz.width);
+                if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) {
+                    if let Ok(p) = st.window.outer_position() {
+                        let o = st.window.outer_size();
+                        st.restore = Some((p.x, p.y, o.width, o.height));
+                    }
+                }
                 st.window.request_redraw();
             }
+            WindowEvent::Moved(p) => {
+                if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) {
+                    let s = st.window.outer_size();
+                    st.restore = Some((p.x, p.y, s.width, s.height));
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => chrome::set_metrics(scale_factor, st.window.inner_size().width),
+            WindowEvent::Focused(true) => st.check_external(),
             WindowEvent::DroppedFile(path) => st.open(&path),
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => st.move_to(position),
+            WindowEvent::CursorLeft { .. } => {
+                st.cursor_in = false;
+                st.hover = None;
+                st.window.request_redraw();
+            }
             WindowEvent::MouseInput { state, button, .. } => {
+                // Ask Windows directly: modifier events can lag behind the click.
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_MENU, VK_SHIFT};
+                let down = |k: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
+                let (alt, shift) = (st.mods.alt_key() || down(VK_MENU), st.mods.shift_key() || down(VK_SHIFT));
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
-                        // Ask Windows directly: modifier events can lag behind the click.
-                        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_MENU, VK_SHIFT};
-                        let down = |k: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
-                        st.press(st.mods.alt_key() || down(VK_MENU), st.mods.shift_key() || down(VK_SHIFT))
+                        if chrome::part_at(st.cursor.x, st.cursor.y) == Some(chrome::Part::Menu) {
+                            st.commit_text();
+                            st.main_menu();
+                        } else if !st.timeline_press() {
+                            st.press(alt, shift);
+                        }
                     }
-                    (MouseButton::Middle, ElementState::Pressed) => st.mode = edit::Mode::Pan,
-                    (MouseButton::Left | MouseButton::Middle, ElementState::Released) => st.release(),
+                    (MouseButton::Right, ElementState::Pressed) => st.press_right(shift),
+                    (MouseButton::Middle, ElementState::Pressed) => st.mode = edit::Mode::Pan { moved: true, at: st.cursor },
+                    (_, ElementState::Released) => {
+                        st.timeline_release();
+                        st.release();
+                    }
                     _ => {}
                 }
                 st.window.request_redraw();
@@ -407,6 +500,7 @@ impl ApplicationHandler for App {
                 let (w, h) = st.engine.size();
                 let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
                 let ctrl = st.mods.control_key();
+                let shift = st.mods.shift_key();
                 let key = event.logical_key.as_ref();
                 // Layout-independent letters for shortcuts (Ctrl+Я is Ctrl+Z).
                 let letter = match &event.physical_key {
@@ -420,9 +514,6 @@ impl ApplicationHandler for App {
                         Key::Named(NamedKey::Enter) if ctrl => st.commit_text(),
                         Key::Named(NamedKey::Backspace) => st.type_text("\u{8}"),
                         Key::Named(NamedKey::Enter) => st.type_text("\n"),
-                        _ if ctrl && letter == Some(KeyCode::KeyS) => {
-                            st.save();
-                        }
                         _ => {
                             if let Some(t) = &event.text {
                                 if !ctrl {
@@ -434,33 +525,41 @@ impl ApplicationHandler for App {
                     st.window.request_redraw();
                     return;
                 }
+                if let Some(t) = &st.timeline {
+                    let (pos, n) = (t.pos, t.steps.len());
+                    match key {
+                        Key::Named(NamedKey::Escape) => st.close_timeline(),
+                        Key::Named(NamedKey::Enter) => st.timeline_restore(),
+                        Key::Named(NamedKey::ArrowLeft) => st.timeline_seek(pos.saturating_sub(1)),
+                        Key::Named(NamedKey::ArrowRight) => st.timeline_seek((pos + 1).min(n)),
+                        Key::Named(NamedKey::Home) => st.timeline_seek(0),
+                        Key::Named(NamedKey::End) => st.timeline_seek(n),
+                        _ => {}
+                    }
+                    st.window.request_redraw();
+                    return;
+                }
                 if ctrl {
                     match letter {
-                        Some(KeyCode::KeyS) => {
-                            st.save();
-                        }
-                        Some(KeyCode::KeyZ) => st.undo(st.mods.shift_key()),
+                        Some(KeyCode::KeyS) => st.flush(),
+                        Some(KeyCode::KeyZ) => st.undo(shift),
                         Some(KeyCode::KeyY) => st.undo(true),
+                        Some(KeyCode::KeyG) => st.wrap_selection(),
+                        Some(KeyCode::KeyO) => st.open_dialog(),
+                        Some(KeyCode::KeyN) => st.new_board(),
+                        Some(KeyCode::KeyH) => st.open_timeline(),
                         _ => {}
                     }
                 }
                 match key {
-                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => st.delete_selection(),
-                    Key::Named(NamedKey::Escape) => st.sel.clear(),
-                    Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F2) => st.edit_selected(),
-                    _ => {}
-                }
-                match key {
-                    Key::Character("o") | Key::Character("щ") if ctrl => {
-                        let pick = rfd::FileDialog::new()
-                            .add_filter("Excalidraw", &["excalidraw", "md", "json"])
-                            .set_title("Открыть схему")
-                            .pick_file();
-                        if let Some(p) = pick {
-                            st.open(&p);
-                        }
+                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => st.delete_selection(shift),
+                    Key::Named(NamedKey::Escape) => {
+                        st.sel.clear();
+                        st.sel_edge = None;
                     }
-                    Key::Named(NamedKey::Home) | Key::Character("f") | Key::Character("а") if !ctrl => st.engine.fit(),
+                    Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F2) => st.edit_selected(),
+                    Key::Named(NamedKey::Home) => st.engine.fit(),
+                    Key::Character("f") | Key::Character("а") if !ctrl => st.engine.fit(),
                     Key::Character("=") | Key::Character("+") => st.engine.zoom_at(1.25, cx, cy),
                     Key::Character("-") => st.engine.zoom_at(0.8, cx, cy),
                     _ => {}
@@ -469,9 +568,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let next = st.last_frame + st.frame_interval;
-                if !self.args.vsync && Instant::now() + Duration::from_micros(500) < next {
+                if !self.args.vsync && st.shown && Instant::now() + Duration::from_micros(500) < next {
                     st.pending = true;
-                    el.set_control_flow(ControlFlow::WaitUntil(next));
                     return;
                 }
                 st.last_frame = Instant::now();
@@ -487,7 +585,7 @@ impl ApplicationHandler for App {
                 }
                 if st.script.is_some() {
                     if !st.script_step() {
-                        el.exit();
+                        st.quit(el);
                         return;
                     }
                     st.window.request_redraw();
@@ -501,8 +599,11 @@ impl ApplicationHandler for App {
                     }
                 }
                 st.refresh_overlay();
-                st.update_title();
-                st.engine.render();
+                let drawn = st.engine.render();
+                if drawn && !st.shown {
+                    st.shown = true;
+                    chrome::cloak(false);
+                }
                 let now = Instant::now();
                 if let Some(b) = &mut st.auto {
                     if let Some(last) = b.last {
@@ -524,7 +625,7 @@ impl ApplicationHandler for App {
                     }
                     b.last = Some(now);
                 }
-                if st.auto.is_some() || touchpad_busy || st.animating() {
+                if st.auto.is_some() || touchpad_busy || st.animating() || !drawn {
                     st.window.request_redraw();
                 }
             }
@@ -535,13 +636,22 @@ impl ApplicationHandler for App {
 
 impl App {
     fn wake(&mut self, el: &ActiveEventLoop) {
-        if let Some(st) = &mut self.state {
-            if st.pending && Instant::now() + Duration::from_micros(500) >= st.last_frame + st.frame_interval {
+        let Some(st) = &mut self.state else { return };
+        st.maybe_save();
+        let mut until = st.save_at;
+        if st.pending {
+            let next = st.last_frame + st.frame_interval;
+            if Instant::now() + Duration::from_micros(500) >= next {
                 st.pending = false;
-                el.set_control_flow(ControlFlow::Wait);
                 st.window.request_redraw();
+            } else {
+                until = Some(until.map_or(next, |u| u.min(next)));
             }
         }
+        el.set_control_flow(match until {
+            Some(t) => ControlFlow::WaitUntil(t),
+            None => ControlFlow::Wait,
+        });
     }
 }
 

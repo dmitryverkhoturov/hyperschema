@@ -1,14 +1,19 @@
 //! Scripted input for testing without touching the real mouse:
 //! `hyperschema file --script steps.txt` plays one line per frame and
-//! writes `steps.txt.log`. Coordinates are window pixels.
+//! writes `steps.txt.log`. Coordinates are window pixels. Run it on a copy:
+//! the board saves itself.
 //!
-//! move X Y | down [alt] [shift] | up | click X Y | dbl X Y | drag X0 Y0 X1 Y1 [alt]
-//! type TEXT | key esc|enter|backspace|delete|undo|redo|save | wheel N | fit
-//! shot out.png | state | quit        (# starts a comment)
+//! move X Y | down [alt] [shift] | up | rdown | click X Y | dbl X Y
+//! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
+//! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group
+//! choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
+//! timeline open|seek N|restore|close | shot out.png | state | tree | quit
+//! (# starts a comment)
 
 use crate::State;
 use std::path::PathBuf;
 use winit::dpi::PhysicalPosition;
+use winit::keyboard::ModifiersState;
 
 pub struct Script {
     lines: Vec<String>,
@@ -44,53 +49,104 @@ impl State {
         let n = |i: usize| w.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let has = |k: &str| w.iter().skip(1).any(|x| *x == k);
         let mut note = String::new();
+        let mut queue: Vec<String> = Vec::new();
         match w.first().copied().unwrap_or("") {
             "move" => self.move_to(PhysicalPosition::new(n(1), n(2))),
-            "down" => self.press(has("alt"), has("shift")),
-            "up" => self.release(),
-            "click" | "dbl" => {
-                let (x, y) = (n(1), n(2));
-                let mut q = vec![format!("move {x} {y}"), "down".into(), "up".into()];
-                if w[0] == "dbl" {
-                    q.extend(["down".to_string(), "up".to_string()]);
+            "down" => {
+                if has("shift") {
+                    self.mods = ModifiersState::SHIFT;
                 }
-                self.script.as_mut().unwrap().queue.extend(q);
+                self.press(has("alt"), has("shift"))
             }
-            "drag" => {
+            "rdown" => self.press_right(false),
+            "up" => {
+                self.release();
+                self.mods = ModifiersState::empty();
+            }
+            "click" | "dbl" => {
+                // Scripted clicks come faster than a double-click; only `dbl` is one.
+                self.last_press = None;
+                let (x, y) = (n(1), n(2));
+                queue = vec![format!("move {x} {y}"), "down".into(), "up".into()];
+                if w[0] == "dbl" {
+                    queue.extend(["down".to_string(), "up".to_string()]);
+                }
+            }
+            "drag" | "rdrag" | "dbldrag" => {
+                self.last_press = None;
                 let (x0, y0, x1, y1) = (n(1), n(2), n(3), n(4));
-                let m = if has("alt") { " alt" } else { "" };
-                let mut q = vec![format!("move {x0} {y0}"), format!("down{m}")];
+                let mut m = String::new();
+                if has("alt") {
+                    m.push_str(" alt");
+                }
+                if has("shift") {
+                    m.push_str(" shift");
+                }
+                queue.push(format!("move {x0} {y0}"));
+                match w[0] {
+                    "rdrag" => queue.push("rdown".into()),
+                    "dbldrag" => queue.extend(["down".to_string(), "up".to_string(), "down".to_string()]),
+                    _ => queue.push(format!("down{m}")),
+                }
                 for k in 1..=8 {
                     let t = k as f64 / 8.0;
-                    q.push(format!("move {} {}", x0 + (x1 - x0) * t, y0 + (y1 - y0) * t));
+                    queue.push(format!("move {} {}", x0 + (x1 - x0) * t, y0 + (y1 - y0) * t));
                 }
-                q.push("up".into());
-                self.script.as_mut().unwrap().queue.extend(q);
+                queue.push("up".into());
             }
             "type" => {
                 let t = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
                 self.type_text(&t);
             }
             "key" => match w.get(1).copied().unwrap_or("") {
-                "esc" => self.commit_text(),
+                "esc" => {
+                    if self.editing_text() {
+                        self.commit_text()
+                    } else {
+                        self.sel.clear()
+                    }
+                }
                 "enter" => self.type_text("\n"),
                 "backspace" => self.type_text("\u{8}"),
-                "delete" => self.delete_selection(),
+                "delete" => self.delete_selection(false),
+                "sdelete" => self.delete_selection(true),
                 "undo" => self.undo(false),
                 "redo" => self.undo(true),
-                "save" => note = format!("saved={}", self.save()),
+                "save" => self.flush(),
+                "group" => self.wrap_selection(),
                 other => note = format!("unknown key {other}"),
             },
+            "choose" => self.script_choice = Some(n(1) as i32),
             "wheel" => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.engine.zoom_at(1.18f64.powf(n(1)), x, y);
             }
             "fit" => self.engine.fit(),
+            "screen" => {
+                // World coordinates = window pixels, for writing tests.
+                let (w, h) = self.engine.size();
+                self.engine.cam.cx = w as f64 / 2.0;
+                self.engine.cam.cy = h as f64 / 2.0;
+                self.engine.cam.s = 1.0;
+                note = format!("{w}x{h} scale {}", self.window.scale_factor());
+            }
+            "cam" => {
+                self.engine.cam.cx = n(1);
+                self.engine.cam.cy = n(2);
+                self.engine.cam.s = n(3);
+            }
+            "timeline" => match w.get(1).copied().unwrap_or("") {
+                "open" => self.open_timeline(),
+                "seek" => self.timeline_seek(n(2) as usize),
+                "restore" => self.timeline_restore(),
+                _ => self.close_timeline(),
+            },
             "shot" => {
                 self.refresh_overlay();
                 crate::write_png(&mut self.engine, w.get(1).copied().unwrap_or("shot.png"));
             }
             "state" => note = self.describe(),
+            "tree" => note = format!("\n{}", self.tree()),
             "quit" => {
                 let sc = self.script.as_mut().unwrap();
                 sc.pos = sc.lines.len();
@@ -99,24 +155,51 @@ impl State {
             other => note = format!("unknown command {other}"),
         }
         let sc = self.script.as_mut().unwrap();
+        for (k, q) in queue.into_iter().enumerate() {
+            sc.queue.insert(k, q);
+        }
         if !w.is_empty() && !matches!(w[0], "move") {
             sc.out.push_str(&format!("{line}{}{note}\n", if note.is_empty() { "" } else { "  -> " }));
         }
         true
     }
 
+    fn label_of(&self, id: &str) -> String {
+        self.shown().get(id).map(|n| if n.text.is_empty() { format!("#{id}") } else { n.text.replace('\n', " ") }).unwrap_or_else(|| format!("?{id}"))
+    }
+
     fn describe(&self) -> String {
-        let Some(doc) = &self.doc else { return "no document".into() };
-        let live = (0..doc.els.len()).filter(|&i| doc.live(i)).count();
-        let sel: Vec<String> = self
-            .sel
-            .iter()
-            .map(|&i| {
-                let b = doc.bbox(i);
-                let t = doc.bound_text(i).map(|t| doc.text(t)).unwrap_or_else(|| if doc.kind(i) == "text" { doc.text(i) } else { String::new() });
-                format!("{}#{i}[{:.0},{:.0} {:.0}x{:.0}]{t:?}", doc.kind(i), b[0], b[1], b[2] - b[0], b[3] - b[1])
-            })
-            .collect();
-        format!("elements {} live {live} dirty {} editing {} sel [{}]", doc.els.len(), doc.dirty, self.editing_text(), sel.join(", "))
+        let sel: Vec<String> = self.sel.iter().map(|id| self.label_of(id)).collect();
+        let edge = self.sel_edge.as_ref().and_then(|e| self.board.edge(e)).map(|e| format!(" edge {}--{}", self.label_of(&e.from), self.label_of(&e.to))).unwrap_or_default();
+        format!(
+            "nodes {} links {} sel [{}]{edge} editing {} undo {} unsaved {}",
+            self.board.nodes.len(),
+            self.board.edges.iter().filter(|e| e.kind == hs_core::board::Kind::Link).count(),
+            sel.join(", "),
+            self.editing_text(),
+            self.undo_stack.len(),
+            self.unsaved.len()
+        )
+    }
+
+    /// The nesting tree with boxes, then the visible connections.
+    fn tree(&self) -> String {
+        let mut s = String::new();
+        let b = self.shown();
+        for id in b.draw_order() {
+            let n = b.node(&id);
+            let d = b.depth(&id);
+            s.push_str(&format!("{}{} [{:.0},{:.0} {:.0}x{:.0} f{:.1}]\n", "  ".repeat(d + 1), self.label_of(&id), n.x, n.y, n.w, n.h, n.font));
+        }
+        for e in b.edges.iter().filter(|e| e.kind == hs_core::board::Kind::Link) {
+            let arrow = match (e.arrow_from, e.arrow_to) {
+                (false, false) => "--",
+                (false, true) => "->",
+                (true, false) => "<-",
+                _ => "<->",
+            };
+            s.push_str(&format!("  {} {arrow} {}{}\n", self.label_of(&e.from), self.label_of(&e.to), if e.label.is_empty() { String::new() } else { format!(" «{}»", e.label) }));
+        }
+        s
     }
 }
