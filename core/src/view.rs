@@ -38,7 +38,7 @@ pub fn node_into(board: &Board, n: &Node, m: Measure, out: &mut Scene) {
     if n.shape == NShape::Text {
         out.labels.push(Label { x: n.x, y: n.y, w: n.w, size: n.font, color: stroke, align: Align::Left, wrap: false, text: n.text.clone() });
     } else if board.has_children(&n.id) {
-        out.labels.push(Label { x: n.x + pad, y: n.y + pad, w: n.w - 2.0 * pad, size: n.font, color: stroke, align: Align::Left, wrap: true, text: n.text.clone() });
+        out.labels.push(Label { x: n.x + pad, y: n.y + pad, w: n.w - 2.0 * pad, size: n.font, color: stroke, align: Align::Center, wrap: true, text: n.text.clone() });
     } else {
         let w = (n.w - 2.0 * pad).max(n.font);
         let lines = m(&n.text, n.font, w) as f32;

@@ -2,6 +2,7 @@
 
     <application
         android:label="Hyperschema"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
         android:hardwareAccelerated="true"
         android:allowBackup="true">
@@ -14,7 +15,7 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- Open .excalidraw / .excalidraw.md from a file manager or Obsidian. -->
+            <!-- Open .hyperschema / .excalidraw(.md) from a file manager or Obsidian. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
