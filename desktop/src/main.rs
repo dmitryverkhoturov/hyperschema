@@ -14,12 +14,11 @@ mod edit;
 mod script;
 mod store;
 
-use hs_core::board::{Board, Change, Snapshot};
+use hs_core::board::Change;
+use hs_core::editor::{Editor, Pos};
 use hs_core::history::History;
-use hs_core::route::Pt;
 use hs_core::{bench, wgpu, Engine};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -28,6 +27,8 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use hs_core::editor::Mode;
+use hs_core::touch::Touch;
 use winit::window::{Window, WindowId};
 
 const DEFAULT_SCHEME: &str = "board.excalidraw.md";
@@ -100,6 +101,12 @@ fn save_placement(st: &State) {
     let _ = std::fs::write(data_dir().join("window.txt"), format!("{x} {y} {w} {h} {}", chrome::maximized() as u8));
 }
 
+/// Test harness run (HS_SHOT=prefix): F9 writes prefix-N.png and
+/// prefix-N.txt (state and tree); the remembered file and window stay put.
+pub fn harness() -> Option<String> {
+    std::env::var("HS_SHOT").ok()
+}
+
 /// Debug trace into %APPDATA%\Hyperschema\debug.log when HS_DEBUG is set.
 pub fn dlog(msg: String) {
     if std::env::var_os("HS_DEBUG").is_some() {
@@ -117,6 +124,13 @@ pub fn write_png(engine: &mut Engine, path: &str) {
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).expect("write png");
+}
+
+/// A mouse message Windows made up from a touch (the touch itself arrives
+/// as Touch events).
+fn from_touch() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetMessageExtraInfo;
+    (unsafe { GetMessageExtraInfo() }.0 as u32 & 0xFFFF_FF00) == 0xFF51_5700
 }
 
 fn log_panics() {
@@ -141,33 +155,23 @@ const BENCH_SECS: f64 = 12.0;
 
 pub struct State {
     window: Arc<Window>,
-    engine: Engine,
+    /// Board, selection, gestures and the engine (shared with Android).
+    ed: Editor,
     dm: Option<dm::Dm>,
+    /// Touch screen gestures (shared with Android).
+    fingers: Touch,
+    started: Instant,
     mods: ModifiersState,
-    cursor: PhysicalPosition<f64>,
     cursor_in: bool,
     touchpad_until: Instant,
 
-    board: Board,
     path: Option<PathBuf>,
     /// Modification time of the file when we read or wrote it.
     mtime: Option<SystemTime>,
     name: String,
     history: Option<History>,
-    routes: HashMap<String, Vec<Pt>>,
-    sel: Vec<String>,
-    sel_edge: Option<String>,
-    /// Concept under the pointer (shows the connect dot).
-    hover: Option<String>,
-    mode: edit::Mode,
-    /// Drawn by the overlay instead of the indexed scene.
-    hidden_nodes: HashSet<String>,
-    hidden_edges: HashSet<String>,
-    last_press: Option<(Instant, PhysicalPosition<f64>)>,
-    caret_epoch: Instant,
-    undo_stack: Vec<Change>,
-    redo_stack: Vec<Change>,
-    step_base: Option<Snapshot>,
+    /// Time (GetMessageTime, ms) and place of the last press, for double clicks.
+    last_press: Option<(u32, Pos)>,
     unsaved: Vec<Change>,
     save_at: Option<Instant>,
     timeline: Option<store::Timeline>,
@@ -186,9 +190,23 @@ pub struct State {
     restore: Option<(i32, i32, u32, u32)>,
 }
 
+impl std::ops::Deref for State {
+    type Target = Editor;
+    fn deref(&self) -> &Editor {
+        &self.ed
+    }
+}
+
+impl std::ops::DerefMut for State {
+    fn deref_mut(&mut self) -> &mut Editor {
+        &mut self.ed
+    }
+}
+
 impl State {
     fn move_to(&mut self, position: PhysicalPosition<f64>) {
-        let prev = std::mem::replace(&mut self.cursor, position);
+        let position = Pos { x: position.x, y: position.y };
+        let prev = std::mem::replace(&mut self.ed.cursor, position);
         let was_menu = chrome::part_at(prev.x, prev.y) == Some(chrome::Part::Menu);
         let is_menu = chrome::part_at(position.x, position.y) == Some(chrome::Part::Menu);
         self.cursor_in = true;
@@ -206,8 +224,8 @@ impl State {
     }
 
     fn start_bench(&mut self) {
-        self.engine.fit();
-        let c = self.engine.cam;
+        self.ed.engine.fit();
+        let c = self.ed.engine.cam;
         self.auto = Some(AutoBench { start: Instant::now(), from: (c.cx, c.cy, c.s), last: None, intervals: Vec::new(), cpu: Vec::new(), text: Vec::new(), rows: Vec::new() });
     }
 
@@ -217,7 +235,7 @@ impl State {
         let t = b.start.elapsed().as_secs_f64();
         let (cx, cy, s0) = b.from;
         let deep = 1.5f64;
-        let cam = &mut self.engine.cam;
+        let cam = &mut self.ed.engine.cam;
         if t < 4.0 {
             let k = t / 4.0;
             cam.s = s0 * (deep / s0).powf(k);
@@ -253,8 +271,8 @@ impl State {
         let report = format!(
             "{} — {} элементов — {}\nкадров {}, средний интервал {:.2} мс ({:.1} fps), p50 {:.2}, p95 {:.2}, p99 {:.2}, max {:.2} мс\nкадров >20 мс: {} ({:.1}%)\nCPU на кадр: среднее {:.2} мс, max {:.2} мс; пересборка текста max {:.2} мс\n",
             self.name,
-            self.engine.scene().element_count(),
-            self.engine.adapter_info,
+            self.ed.engine.scene().element_count(),
+            self.ed.engine.adapter_info,
             n,
             avg,
             1000.0 / avg,
@@ -275,7 +293,7 @@ impl State {
     fn quit(&mut self, el: &ActiveEventLoop) {
         self.commit_text();
         self.flush();
-        if self.script.is_none() && self.auto.is_none() {
+        if self.script.is_none() && self.auto.is_none() && harness().is_none() {
             save_placement(self);
         }
         el.exit();
@@ -349,31 +367,21 @@ impl ApplicationHandler for App {
         let refresh = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).unwrap_or(60_000);
         let frame_interval = Duration::from_micros(1_000_000_000 / refresh as u64);
         let dm = hwnd.and_then(|h| dm::Dm::new(h).ok());
+        let scale = window.scale_factor();
         let mut st = State {
+            ed: Editor::new(engine, window.scale_factor() as f32, false),
             window,
-            engine,
             dm,
+            fingers: Touch::new(scale),
+            started: Instant::now(),
             mods: ModifiersState::default(),
-            cursor: PhysicalPosition::new(-1.0, -1.0),
             cursor_in: false,
             touchpad_until: Instant::now(),
-            board: Board::new(),
             path: None,
             mtime: None,
             name: String::new(),
             history: None,
-            routes: HashMap::new(),
-            sel: Vec::new(),
-            sel_edge: None,
-            hover: None,
-            mode: edit::Mode::Idle,
-            hidden_nodes: HashSet::new(),
-            hidden_edges: HashSet::new(),
             last_press: None,
-            caret_epoch: Instant::now(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            step_base: None,
             unsaved: Vec::new(),
             save_at: None,
             timeline: None,
@@ -388,21 +396,21 @@ impl ApplicationHandler for App {
         };
 
         if let Some(n) = self.args.bench {
-            st.engine.set_scene(bench::generate(n));
-            st.engine.fit();
+            st.ed.engine.set_scene(bench::generate(n));
+            st.ed.engine.fit();
             st.name = format!("тест {n} блоков");
         } else {
             let path = self.args.file.clone().or_else(last_file).unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEME));
             st.open(&path);
         }
         if let Some((x, y, sc)) = self.args.cam {
-            st.engine.cam.cx = x;
-            st.engine.cam.cy = y;
-            st.engine.cam.s = sc;
+            st.ed.engine.cam.cx = x;
+            st.ed.engine.cam.cy = y;
+            st.ed.engine.cam.s = sc;
         }
         if let Some(path) = &self.args.shot {
             st.refresh_overlay();
-            write_png(&mut st.engine, path);
+            write_png(&mut st.ed.engine, path);
             el.exit();
             return;
         }
@@ -418,7 +426,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => st.quit(el),
             WindowEvent::Resized(sz) => {
-                st.engine.resize(sz.width, sz.height);
+                st.ed.engine.resize(sz.width, sz.height);
                 chrome::set_metrics(st.window.scale_factor(), sz.width);
                 if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) {
                     if let Ok(p) = st.window.outer_position() {
@@ -438,10 +446,27 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(true) => st.check_external(),
             WindowEvent::DroppedFile(path) => st.open(&path),
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
-            WindowEvent::CursorMoved { position, .. } => st.move_to(position),
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } if from_touch() => {}
+            WindowEvent::Touch(t) => {
+                use winit::event::TouchPhase;
+                let ms = st.started.elapsed().as_millis() as u64;
+                let (x, y) = (t.location.x, t.location.y);
+                match t.phase {
+                    TouchPhase::Started => st.fingers.down(&mut st.ed, t.id, x, y, ms),
+                    TouchPhase::Moved => st.fingers.moved(&mut st.ed, t.id, x, y, ms),
+                    TouchPhase::Ended => st.fingers.up(&mut st.ed, t.id, x, y, ms),
+                    TouchPhase::Cancelled => st.fingers.cancel(&mut st.ed),
+                }
+                st.settle();
+                st.window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                st.ed.touch = false;
+                st.move_to(position)
+            }
             WindowEvent::CursorLeft { .. } => {
                 st.cursor_in = false;
-                st.hover = None;
+                st.ed.hover = None;
                 st.window.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -451,7 +476,7 @@ impl ApplicationHandler for App {
                 let (alt, shift) = (st.mods.alt_key() || down(VK_MENU), st.mods.shift_key() || down(VK_SHIFT));
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
-                        if chrome::part_at(st.cursor.x, st.cursor.y) == Some(chrome::Part::Menu) {
+                        if chrome::part_at(st.ed.cursor.x, st.ed.cursor.y) == Some(chrome::Part::Menu) {
                             st.commit_text();
                             st.main_menu();
                         } else if !st.timeline_press() {
@@ -459,7 +484,7 @@ impl ApplicationHandler for App {
                         }
                     }
                     (MouseButton::Right, ElementState::Pressed) => st.press_right(shift),
-                    (MouseButton::Middle, ElementState::Pressed) => st.mode = edit::Mode::Pan { moved: true, at: st.cursor },
+                    (MouseButton::Middle, ElementState::Pressed) => st.ed.mode = Mode::Pan { moved: true, at: st.ed.cursor },
                     (_, ElementState::Released) => {
                         st.timeline_release();
                         st.release();
@@ -471,13 +496,13 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 // Touchpads normally arrive through DirectManipulation; this
                 // is the mouse wheel and a fallback if DM is unavailable.
-                let (x, y) = (st.cursor.x, st.cursor.y);
+                let (x, y) = (st.ed.cursor.x, st.ed.cursor.y);
                 match delta {
                     MouseScrollDelta::PixelDelta(p) => {
                         if st.mods.control_key() {
-                            st.engine.zoom_at((p.y * 0.01).exp(), x, y);
+                            st.ed.engine.zoom_at((p.y * 0.01).exp(), x, y);
                         } else {
-                            st.engine.pan(p.x, p.y);
+                            st.ed.engine.pan(p.x, p.y);
                         }
                     }
                     MouseScrollDelta::LineDelta(dx, dy) => {
@@ -487,9 +512,9 @@ impl ApplicationHandler for App {
                         }
                         let touchpad = Instant::now() < st.touchpad_until;
                         if touchpad && !st.mods.control_key() {
-                            st.engine.pan(dx as f64 * 60.0, dy as f64 * 60.0);
+                            st.ed.engine.pan(dx as f64 * 60.0, dy as f64 * 60.0);
                         } else {
-                            st.engine.zoom_at(1.18f64.powf(dy as f64), x, y);
+                            st.ed.engine.zoom_at(1.18f64.powf(dy as f64), x, y);
                         }
                     }
                 }
@@ -497,17 +522,35 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 dlog(format!("key {:?} text={:?}", event.logical_key, event.text));
-                let (w, h) = st.engine.size();
+                let (w, h) = st.ed.engine.size();
                 let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
                 let ctrl = st.mods.control_key();
                 let shift = st.mods.shift_key();
                 let key = event.logical_key.as_ref();
+                if let (Some(pre), Key::Named(NamedKey::F9)) = (harness(), &key) {
+                    st.harness_shot(&pre);
+                    return;
+                }
+                if let (Some(_), Key::Named(NamedKey::F8)) = (harness(), &key) {
+                    // World coordinates = window pixels, for writing tests.
+                    let (w, h) = st.ed.engine.size();
+                    st.ed.engine.cam.cx = w as f64 / 2.0;
+                    st.ed.engine.cam.cy = h as f64 / 2.0;
+                    st.ed.engine.cam.s = 1.0;
+                    st.window.request_redraw();
+                    return;
+                }
                 // Layout-independent letters for shortcuts (Ctrl+Я is Ctrl+Z).
                 let letter = match &event.physical_key {
                     winit::keyboard::PhysicalKey::Code(c) => Some(*c),
                     _ => None,
                 };
                 use winit::keyboard::KeyCode;
+                if st.editing_text() && ctrl && matches!(letter, Some(KeyCode::KeyZ) | Some(KeyCode::KeyY)) {
+                    st.undo(letter == Some(KeyCode::KeyY) || shift);
+                    st.window.request_redraw();
+                    return;
+                }
                 if st.editing_text() {
                     match key {
                         Key::Named(NamedKey::Escape) => st.commit_text(),
@@ -554,14 +597,14 @@ impl ApplicationHandler for App {
                 match key {
                     Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => st.delete_selection(shift),
                     Key::Named(NamedKey::Escape) => {
-                        st.sel.clear();
-                        st.sel_edge = None;
+                        st.ed.sel.clear();
+                        st.ed.sel_edge = None;
                     }
                     Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F2) => st.edit_selected(),
-                    Key::Named(NamedKey::Home) => st.engine.fit(),
-                    Key::Character("f") | Key::Character("а") if !ctrl => st.engine.fit(),
-                    Key::Character("=") | Key::Character("+") => st.engine.zoom_at(1.25, cx, cy),
-                    Key::Character("-") => st.engine.zoom_at(0.8, cx, cy),
+                    Key::Named(NamedKey::Home) => st.ed.engine.fit(),
+                    Key::Character("f") | Key::Character("а") if !ctrl => st.ed.engine.fit(),
+                    Key::Character("=") | Key::Character("+") => st.ed.engine.zoom_at(1.25, cx, cy),
+                    Key::Character("-") => st.ed.engine.zoom_at(0.8, cx, cy),
                     _ => {}
                 }
                 st.window.request_redraw();
@@ -577,8 +620,8 @@ impl ApplicationHandler for App {
                 if let Some(dm) = &st.dm {
                     for g in dm.poll() {
                         match g {
-                            dm::Gesture::Pan(dx, dy) => st.engine.pan(dx, dy),
-                            dm::Gesture::Zoom(f) => st.engine.zoom_at(f, st.cursor.x, st.cursor.y),
+                            dm::Gesture::Pan(dx, dy) => st.ed.engine.pan(dx, dy),
+                            dm::Gesture::Zoom(f) => st.ed.engine.zoom_at(f, st.ed.cursor.x, st.ed.cursor.y),
                         }
                     }
                     touchpad_busy = dm.busy();
@@ -590,6 +633,8 @@ impl ApplicationHandler for App {
                     }
                     st.window.request_redraw();
                 }
+                let ms = st.started.elapsed().as_millis() as u64;
+                let gliding = st.fingers.tick(&mut st.ed, ms);
                 let benching = st.step_bench();
                 if !benching && st.auto.is_some() {
                     st.finish_bench();
@@ -599,7 +644,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 st.refresh_overlay();
-                let drawn = st.engine.render();
+                let drawn = st.ed.engine.render();
                 if drawn && !st.shown {
                     st.shown = true;
                     chrome::cloak(false);
@@ -607,7 +652,7 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 if let Some(b) = &mut st.auto {
                     if let Some(last) = b.last {
-                        let s = st.engine.stats;
+                        let s = st.ed.engine.stats;
                         b.intervals.push((now - last).as_secs_f32() * 1000.0);
                         b.cpu.push(s.frame_ms);
                         b.text.push(s.text_ms);
@@ -615,7 +660,7 @@ impl ApplicationHandler for App {
                             "{:.2},{:.2},{:.5},{},{},{},{:.2},{:.2}",
                             b.start.elapsed().as_secs_f32(),
                             (now - last).as_secs_f32() * 1000.0,
-                            st.engine.cam.s,
+                            st.ed.engine.cam.s,
                             s.rects,
                             s.lines,
                             s.glyphs,
@@ -625,7 +670,7 @@ impl ApplicationHandler for App {
                     }
                     b.last = Some(now);
                 }
-                if st.auto.is_some() || touchpad_busy || st.animating() || !drawn {
+                if st.auto.is_some() || touchpad_busy || gliding || st.animating() || !drawn {
                     st.window.request_redraw();
                 }
             }

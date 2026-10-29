@@ -2,7 +2,7 @@
 # Builds the Rust core for Android and the APK. Run from the repo root in Git Bash.
 set -e
 export PATH="$HOME/.cargo/bin:$PATH"
-for t in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
+for t in ${HS_ABIS:-aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64}; do
   triple=${t%%:*}
   abi=${t##*:}
   cargo build --profile android -p hs-android --target "$triple"

@@ -5,6 +5,7 @@
 pub mod bench;
 pub mod board;
 pub mod doc;
+pub mod editor;
 pub mod engine;
 pub mod excalidraw;
 pub mod history;
@@ -13,6 +14,7 @@ pub mod route;
 pub mod scene;
 pub mod spatial;
 pub mod text;
+pub mod touch;
 pub mod view;
 
 pub use engine::{Camera, Engine, Stats};

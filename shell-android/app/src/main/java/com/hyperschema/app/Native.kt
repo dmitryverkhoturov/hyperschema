@@ -13,18 +13,23 @@ object Native {
     external fun detach(h: Long)
     external fun resize(h: Long, w: Int, hgt: Int)
     external fun pan(h: Long, dx: Float, dy: Float)
+    external fun editSelected(h: Long)
     external fun zoom(h: Long, f: Float, x: Float, y: Float)
     external fun fit(h: Long)
     external fun render(h: Long): Boolean
+    /** action: 0 down, 1 move, 2 up, 3 cancel; t: event time, ms. */
+    external fun touch(h: Long, action: Int, id: Long, x: Float, y: Float, t: Long)
+    external fun tick(h: Long, t: Long): Boolean
+    external fun poll(h: Long): String
     external fun load(h: Long, text: String): String?
     external fun editable(h: Long): Boolean
     external fun serialize(h: Long): String
-    external fun dragStart(h: Long, x: Float, y: Float): Boolean
-    external fun dragMove(h: Long, x: Float, y: Float)
-    external fun dragEnd(h: Long): Boolean
-    external fun nodeAt(h: Long, x: Float, y: Float): String?
-    external fun setText(h: Long, id: String, text: String)
-    external fun createAt(h: Long, x: Float, y: Float, text: String)
-    external fun delete(h: Long, id: String)
+    external fun setText(h: Long, text: String)
+    external fun commitText(h: Long)
+    external fun undo(h: Long, redo: Boolean)
+    external fun canUndo(h: Long, redo: Boolean): Boolean
+    external fun deleteSelection(h: Long)
+    external fun edgeChoice(h: Long, choice: Int)
+    external fun createCenter(h: Long)
     external fun stats(h: Long): String
 }

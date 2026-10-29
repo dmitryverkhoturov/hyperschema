@@ -3,7 +3,7 @@
 //! history log next to it. Excalidraw drawings are imported once into a
 //! board beside them and never written to.
 
-use crate::edit::Mode;
+use hs_core::editor::Mode;
 use crate::State;
 use hs_core::board::{Board, Change};
 use hs_core::history::{hash, History};
@@ -137,30 +137,32 @@ impl State {
         let board = Board::parse(&text)?;
         let history = History::for_file(path);
         let _ = history.compact(now_ms());
-        self.undo_stack = history.recent_undo(&text, now_ms());
-        self.redo_stack.clear();
+        self.ed.undo_stack = history.recent_undo(&text, now_ms());
+        self.ed.redo_stack.clear();
         self.unsaved.clear();
         self.save_at = None;
-        self.step_base = None;
+        self.ed.step_base = None;
         self.history = Some(history);
-        self.board = board;
-        self.mode = Mode::Idle;
-        self.sel.clear();
-        self.sel_edge = None;
-        self.hover = None;
+        self.ed.board = board;
+        self.ed.mode = Mode::Idle;
+        self.ed.sel.clear();
+        self.ed.sel_edge = None;
+        self.ed.hover = None;
         self.timeline = None;
-        self.hidden_nodes.clear();
-        self.hidden_edges.clear();
+        self.ed.frozen = false;
+        self.ed.preview = None;
+        self.ed.hidden_nodes.clear();
+        self.ed.hidden_edges.clear();
         self.mtime = mtime(path);
         self.path = Some(path.to_path_buf());
         self.name = stem(path);
         self.window.set_title(&self.name);
-        if self.script.is_none() {
+        if self.script.is_none() && crate::harness().is_none() {
             crate::remember(path);
             push_recent(path);
         }
         self.rebuild();
-        self.engine.fit();
+        self.ed.engine.fit();
         Ok(())
     }
 
@@ -175,7 +177,7 @@ impl State {
 
     /// Saves now if a save is due and nothing is mid-gesture.
     pub fn maybe_save(&mut self) {
-        if self.save_at.is_some_and(|t| Instant::now() >= t) && matches!(self.mode, Mode::Idle) {
+        if self.save_at.is_some_and(|t| Instant::now() >= t) && matches!(self.ed.mode, Mode::Idle) {
             self.flush();
         }
     }
@@ -187,7 +189,7 @@ impl State {
             return;
         }
         let Some(path) = self.path.clone() else { return };
-        let text = self.board.serialize();
+        let text = self.ed.board.serialize();
         if path.exists() && mtime(&path) != self.mtime {
             backup(&path);
         }
@@ -210,12 +212,12 @@ impl State {
     /// When the window comes back: pick up a file changed elsewhere (sync).
     pub fn check_external(&mut self) {
         let Some(path) = self.path.clone() else { return };
-        if !self.unsaved.is_empty() || !matches!(self.mode, Mode::Idle) || mtime(&path) == self.mtime {
+        if !self.unsaved.is_empty() || !matches!(self.ed.mode, Mode::Idle) || mtime(&path) == self.mtime {
             return;
         }
-        let cam = self.engine.cam;
+        let cam = self.ed.engine.cam;
         if self.load(&path).is_ok() {
-            self.engine.cam = cam;
+            self.ed.engine.cam = cam;
         }
     }
 
@@ -290,14 +292,17 @@ impl State {
         self.flush();
         let steps = self.history.as_ref().map(|h| h.load_all()).unwrap_or_default();
         let pos = steps.len();
-        self.sel.clear();
-        self.sel_edge = None;
+        self.ed.sel.clear();
+        self.ed.sel_edge = None;
         self.timeline = Some(Timeline { steps, pos, preview: None, dragging: false });
+        self.ed.frozen = true;
         self.window.request_redraw();
     }
 
     pub fn close_timeline(&mut self) {
         self.timeline = None;
+        self.ed.frozen = false;
+        self.ed.preview = None;
         self.rebuild();
     }
 
@@ -311,12 +316,13 @@ impl State {
         if pos == t.steps.len() {
             t.preview = None;
         } else {
-            let mut b = self.board.clone();
+            let mut b = self.ed.board.clone();
             for c in t.steps[pos..].iter().rev() {
                 b.apply(c, false);
             }
             t.preview = Some(b);
         }
+        self.ed.preview = t.preview.clone();
         self.rebuild();
     }
 
@@ -326,16 +332,19 @@ impl State {
             self.close_timeline();
             return;
         };
-        self.begin();
-        self.board = prev;
-        self.board.reindex();
         self.timeline = None;
+        self.ed.frozen = false;
+        self.ed.preview = None;
+        self.begin();
+        self.ed.board = prev;
+        self.ed.board.reindex();
         self.commit();
+        self.settle();
         self.rebuild();
     }
 
     fn bar(&self) -> (f32, f32, f32, f32) {
-        let (w, h) = self.engine.size();
+        let (w, h) = self.ed.engine.size();
         let s = self.window.scale_factor() as f32;
         let bh = 64.0 * s;
         (0.0, h as f32 - bh, w as f32, bh)
@@ -351,7 +360,7 @@ impl State {
     pub fn timeline_press(&mut self) -> bool {
         let Some(t) = &self.timeline else { return false };
         let (_, y, w, _) = self.bar();
-        let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (cx, cy) = (self.ed.cursor.x as f32, self.ed.cursor.y as f32);
         if cy < y {
             return false;
         }
@@ -380,7 +389,7 @@ impl State {
         }
         let n = t.steps.len();
         let (x0, x1, _) = self.track();
-        let k = ((self.cursor.x as f32 - x0) / (x1 - x0)).clamp(0.0, 1.0);
+        let k = ((self.ed.cursor.x as f32 - x0) / (x1 - x0)).clamp(0.0, 1.0);
         self.timeline_seek((k * n as f32).round() as usize);
     }
 
@@ -394,7 +403,7 @@ impl State {
     pub fn refresh_ui(&mut self) {
         let mut ui = Scene::default();
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
-        let menu_hover = matches!(crate::chrome::part_at(self.cursor.x, self.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
+        let menu_hover = matches!(crate::chrome::part_at(self.ed.cursor.x, self.ed.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
         crate::chrome::draw(&mut ui, &self.name, menu_hover, ink);
         if let Some(t) = &self.timeline {
             let s = self.window.scale_factor() as f32;
@@ -429,7 +438,7 @@ impl State {
             btn(&mut ui, w - 280.0 * s, 130.0 * s, "Восстановить", t.preview.is_some());
             btn(&mut ui, w - 140.0 * s, 116.0 * s, "Закрыть", false);
         }
-        self.engine.set_ui(&ui);
+        self.ed.engine.set_ui(&ui);
     }
 }
 

@@ -103,7 +103,7 @@ impl State {
                     if self.editing_text() {
                         self.commit_text()
                     } else {
-                        self.sel.clear()
+                        self.ed.sel.clear()
                     }
                 }
                 "enter" => self.type_text("\n"),
@@ -118,22 +118,22 @@ impl State {
             },
             "choose" => self.script_choice = Some(n(1) as i32),
             "wheel" => {
-                let (x, y) = (self.cursor.x, self.cursor.y);
-                self.engine.zoom_at(1.18f64.powf(n(1)), x, y);
+                let (x, y) = (self.ed.cursor.x, self.ed.cursor.y);
+                self.ed.engine.zoom_at(1.18f64.powf(n(1)), x, y);
             }
-            "fit" => self.engine.fit(),
+            "fit" => self.ed.engine.fit(),
             "screen" => {
                 // World coordinates = window pixels, for writing tests.
-                let (w, h) = self.engine.size();
-                self.engine.cam.cx = w as f64 / 2.0;
-                self.engine.cam.cy = h as f64 / 2.0;
-                self.engine.cam.s = 1.0;
+                let (w, h) = self.ed.engine.size();
+                self.ed.engine.cam.cx = w as f64 / 2.0;
+                self.ed.engine.cam.cy = h as f64 / 2.0;
+                self.ed.engine.cam.s = 1.0;
                 note = format!("{w}x{h} scale {}", self.window.scale_factor());
             }
             "cam" => {
-                self.engine.cam.cx = n(1);
-                self.engine.cam.cy = n(2);
-                self.engine.cam.s = n(3);
+                self.ed.engine.cam.cx = n(1);
+                self.ed.engine.cam.cy = n(2);
+                self.ed.engine.cam.s = n(3);
             }
             "timeline" => match w.get(1).copied().unwrap_or("") {
                 "open" => self.open_timeline(),
@@ -143,7 +143,7 @@ impl State {
             },
             "shot" => {
                 self.refresh_overlay();
-                crate::write_png(&mut self.engine, w.get(1).copied().unwrap_or("shot.png"));
+                crate::write_png(&mut self.ed.engine, w.get(1).copied().unwrap_or("shot.png"));
             }
             "state" => note = self.describe(),
             "tree" => note = format!("\n{}", self.tree()),
@@ -164,20 +164,31 @@ impl State {
         true
     }
 
+    pub fn harness_shot(&mut self, pre: &str) {
+        let k = (1..).find(|k| !std::path::Path::new(&format!("{pre}-{k}.png")).exists()).unwrap();
+        self.refresh_overlay();
+        crate::write_png(&mut self.ed.engine, &format!("{pre}-{k}.png"));
+        let c = &self.ed.engine.cam;
+        let info = format!("{}
+cam {:.1} {:.1} {:.4} size {:?}
+{}", self.describe(), c.cx, c.cy, c.s, self.ed.engine.size(), self.tree());
+        let _ = std::fs::write(format!("{pre}-{k}.txt"), info);
+    }
+
     fn label_of(&self, id: &str) -> String {
         self.shown().get(id).map(|n| if n.text.is_empty() { format!("#{id}") } else { n.text.replace('\n', " ") }).unwrap_or_else(|| format!("?{id}"))
     }
 
     fn describe(&self) -> String {
-        let sel: Vec<String> = self.sel.iter().map(|id| self.label_of(id)).collect();
-        let edge = self.sel_edge.as_ref().and_then(|e| self.board.edge(e)).map(|e| format!(" edge {}--{}", self.label_of(&e.from), self.label_of(&e.to))).unwrap_or_default();
+        let sel: Vec<String> = self.ed.sel.iter().map(|id| self.label_of(id)).collect();
+        let edge = self.ed.sel_edge.as_ref().and_then(|e| self.ed.board.edge(e)).map(|e| format!(" edge {}--{}", self.label_of(&e.from), self.label_of(&e.to))).unwrap_or_default();
         format!(
             "nodes {} links {} sel [{}]{edge} editing {} undo {} unsaved {}",
-            self.board.nodes.len(),
-            self.board.edges.iter().filter(|e| e.kind == hs_core::board::Kind::Link).count(),
+            self.ed.board.nodes.len(),
+            self.ed.board.edges.iter().filter(|e| e.kind == hs_core::board::Kind::Link).count(),
             sel.join(", "),
             self.editing_text(),
-            self.undo_stack.len(),
+            self.ed.undo_stack.len(),
             self.unsaved.len()
         )
     }
