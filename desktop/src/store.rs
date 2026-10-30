@@ -320,13 +320,18 @@ impl State {
             }
             items.push((-1, String::new(), false));
         }
-        items.extend([(3, "Добавить схему…".into(), false), (0, String::new(), false), (4, "Показать в проводнике".into(), false), (5, "История…".into(), false)]);
+        items.extend([(3, "Добавить схему…".into(), false), (0, String::new(), false), (4, "Показать в проводнике".into(), false), (5, "История…".into(), false), (0, String::new(), false), (6, "Связи с вложенными".into(), self.ed.show_nested_links)]);
         match crate::chrome::popup(0.0, h, &items) {
             1 => self.new_board(),
             2 => self.open_dialog(),
             3 => self.import_dialog(),
             4 => self.reveal(),
             5 => self.open_timeline(),
+            6 => {
+                self.ed.show_nested_links = !self.ed.show_nested_links;
+                let _ = std::fs::write(crate::data_dir().join("show-nested-links.txt"), if self.ed.show_nested_links { "1" } else { "0" });
+                self.ed.rebuild();
+            }
             i if i >= 100 => {
                 if let Some(p) = rec.get((i - 100) as usize) {
                     let p = p.clone();

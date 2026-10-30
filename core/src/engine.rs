@@ -143,6 +143,7 @@ pub struct Engine {
     ui_cam_buf: wgpu::Buffer,
     ui_cam_bg: wgpu::BindGroup,
     atlas_tex: wgpu::Texture,
+    wrap_cache: std::cell::RefCell<std::collections::HashMap<(String, u32), usize>>,
     atlas_bg: wgpu::BindGroup,
     /// Level 0 = every shape; level k = every 8^k-th, for far zoom.
     rect_lods: Vec<(Index, wgpu::Buffer)>,
@@ -388,6 +389,7 @@ impl Engine {
             ui_cam_buf,
             ui_cam_bg,
             atlas_tex,
+            wrap_cache: Default::default(),
             atlas_bg,
             rect_lods: Vec::new(),
             rect_median: 1.0,
@@ -592,11 +594,23 @@ impl Engine {
         }
     }
 
-    /// Lines `text` takes when word-wrapped to `width` at font `size`.
+    /// Lines `text` takes when word-wrapped to `width` at font `size`. Only
+    /// the ratio width/size matters, so results are remembered by text and
+    /// ratio: every scene rebuild asks again for every label.
     pub fn wrapped_lines(&self, text: &str, size: f32, width: f32) -> usize {
+        let key = (text.to_string(), (width / size).to_bits());
+        if let Some(&n) = self.wrap_cache.borrow().get(&key) {
+            return n;
+        }
         let label = Label { x: 0.0, y: 0.0, w: width, size, color: 0, align: crate::scene::Align::Left, wrap: true, text: text.to_string() };
         let paras = text.split('\n').count();
-        self.text.make_layout(&label).glyphs.last().map_or(paras, |g| g.2 as usize + 1).max(paras)
+        let n = self.text.make_layout(&label).glyphs.last().map_or(paras, |g| g.2 as usize + 1).max(paras);
+        let mut c = self.wrap_cache.borrow_mut();
+        if c.len() > 50_000 {
+            c.clear();
+        }
+        c.insert(key, n);
+        n
     }
 
     pub fn screen_to_world(&self, x: f64, y: f64) -> (f64, f64) {

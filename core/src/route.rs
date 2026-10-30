@@ -206,34 +206,79 @@ pub fn route_between(board: &Board, a: &Node, b: &Node) -> Vec<Pt> {
         }
     }
     let m = a.font.min(b.font) * 1.1;
-    let obs: Vec<Bbox> = board
-        .nodes
-        .iter()
-        .filter(|n| !own.contains(&n.id))
-        .filter(|n| near.contains(&board.parent(&n.id).map(String::from)))
-        .filter(|n| !board.is_ancestor(&a.id, &n.id) && !board.is_ancestor(&b.id, &n.id))
-        .map(|n| inflate(n.bbox(), m))
-        .collect();
+    // Obstacles: siblings of either end and of their ancestors, minus the
+    // ends' own subtrees (a parent's children are not in its way).
+    let mut obs: Vec<Bbox> = Vec::new();
+    for p in near.iter() {
+        if p.as_deref().is_some_and(|p| p == a.id || p == b.id) {
+            continue;
+        }
+        let kids: Vec<&str> = match p {
+            None => board.roots_ref(),
+            Some(p) => board.children(p).iter().map(String::as_str).collect(),
+        };
+        for id in kids {
+            if !own.contains(id) {
+                obs.push(inflate(board.node(id).bbox(), m));
+            }
+        }
+    }
     let raw = route(a.center(), b.center(), &obs);
     let path = smooth(&raw, m * 2.5);
     clip(&path, &a.bbox(), &b.bbox())
 }
 
+/// Is this connection drawn? A link between a concept and something nested
+/// in it (at any depth) is hidden unless `nested` asks for it.
+pub fn shown(board: &Board, e: &crate::board::Edge, nested: bool) -> bool {
+    e.kind == Kind::Link && (nested || !(board.is_ancestor(&e.from, &e.to) || board.is_ancestor(&e.to, &e.from)))
+}
+
 /// Routes of every visible connection, with overlapping ones pulled apart.
-pub fn route_all(board: &Board) -> HashMap<String, Vec<Pt>> {
+pub fn route_all(board: &Board, nested: bool) -> HashMap<String, Vec<Pt>> {
+    finish(board, &raw_routes(board, nested, None, &HashMap::new()))
+}
+
+/// Routes before lanes. With `only`, just those connections are routed
+/// again; the rest come from `prev`.
+pub fn raw_routes(board: &Board, nested: bool, only: Option<&HashSet<String>>, prev: &HashMap<String, Vec<Pt>>) -> HashMap<String, Vec<Pt>> {
+    let mut out = HashMap::new();
+    for e in board.edges.iter().filter(|e| shown(board, e, nested)) {
+        let (Some(a), Some(b)) = (board.get(&e.from), board.get(&e.to)) else { continue };
+        let keep = only.is_some_and(|o| !o.contains(&e.id));
+        let path = match prev.get(&e.id) {
+            Some(p) if keep => p.clone(),
+            _ => route_between(board, a, b),
+        };
+        out.insert(e.id.clone(), path);
+    }
+    out
+}
+
+/// Lanes for connections that run on top of each other.
+pub fn finish(board: &Board, raw: &HashMap<String, Vec<Pt>>) -> HashMap<String, Vec<Pt>> {
     let mut ids = Vec::new();
     let mut paths = Vec::new();
     let mut gaps = Vec::new();
     let mut ends = Vec::new();
-    for e in board.edges.iter().filter(|e| e.kind == Kind::Link) {
-        let (Some(a), Some(b)) = (board.get(&e.from), board.get(&e.to)) else { continue };
+    for e in &board.edges {
+        let (Some(p), Some(a), Some(b)) = (raw.get(&e.id), board.get(&e.from), board.get(&e.to)) else { continue };
         ids.push(e.id.clone());
-        paths.push(route_between(board, a, b));
+        paths.push(p.clone());
         gaps.push(a.font.min(b.font) * 0.6);
         ends.push((a.bbox(), b.bbox()));
     }
     separate(&mut paths, &gaps, &ends);
     ids.into_iter().zip(paths).collect()
+}
+
+/// Bounding box of a path.
+pub fn path_box(p: &[Pt]) -> Bbox {
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for q in p {
+        b = [b[0].min(q.0), b[1].min(q.1), b[2].max(q.0), b[3].max(q.1)];
+    }
+    b
 }
 
 /// Connections that run on top of each other get lanes: each shifts

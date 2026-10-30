@@ -22,13 +22,15 @@ pub struct Script {
     out: String,
     /// Expanded steps of a compound command (click, dbl, drag).
     queue: Vec<String>,
+    /// `prof`: log how long each pointer move takes.
+    prof: bool,
 }
 
 impl Script {
     pub fn load(path: &str) -> Script {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let lines = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect();
-        Script { lines, pos: 0, log: PathBuf::from(format!("{path}.log")), out: String::new(), queue: Vec::new() }
+        Script { lines, pos: 0, log: PathBuf::from(format!("{path}.log")), out: String::new(), queue: Vec::new(), prof: false }
     }
 }
 
@@ -45,6 +47,7 @@ impl State {
             let _ = std::fs::write(&sc.log, &sc.out);
             return false;
         };
+        let started = std::time::Instant::now();
         let w: Vec<&str> = line.split_whitespace().collect();
         let n = |i: usize| w.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let has = |k: &str| w.iter().skip(1).any(|x| *x == k);
@@ -158,6 +161,12 @@ impl State {
         let sc = self.script.as_mut().unwrap();
         for (k, q) in queue.into_iter().enumerate() {
             sc.queue.insert(k, q);
+        }
+        if sc.prof && w.first() == Some(&"move") {
+            sc.out.push_str(&format!("{line}  ({:.1} ms)\n", started.elapsed().as_secs_f64() * 1000.0));
+        }
+        if w.first() == Some(&"prof") {
+            sc.prof = true;
         }
         if !w.is_empty() && !matches!(w[0], "move") {
             sc.out.push_str(&format!("{line}{}{note}\n", if note.is_empty() { "" } else { "  -> " }));

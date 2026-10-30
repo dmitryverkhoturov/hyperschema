@@ -88,6 +88,12 @@ pub struct Editor {
     pub hover: Option<String>,
     pub mode: Mode,
     pub routes: HashMap<String, Vec<Pt>>,
+    /// Routes before lanes, kept so a drag re-routes only what it touches.
+    raw_routes: HashMap<String, Vec<Pt>>,
+    /// Show connections between a concept and what is nested in it.
+    pub show_nested_links: bool,
+    /// The pointer moved during a move or resize; applied once per frame.
+    drag_pending: bool,
     pub hidden_nodes: HashSet<String>,
     pub hidden_edges: HashSet<String>,
     pub cursor: Pos,
@@ -118,6 +124,9 @@ impl Editor {
             hover: None,
             mode: Mode::Idle,
             routes: HashMap::new(),
+            raw_routes: HashMap::new(),
+            show_nested_links: false,
+            drag_pending: false,
             hidden_nodes: HashSet::new(),
             hidden_edges: HashSet::new(),
             cursor: Pos { x: -1.0, y: -1.0 },
@@ -253,7 +262,8 @@ impl Editor {
     /// Rebuilds routes and the indexed scene, minus what the overlay draws.
     pub fn rebuild(&mut self) {
         let board = self.shown().clone();
-        self.routes = route::route_all(&board);
+        self.raw_routes = route::raw_routes(&board, self.show_nested_links, None, &HashMap::new());
+        self.routes = route::finish(&board, &self.raw_routes);
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
         let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges };
         let scene = view::build(&board, &self.routes, &m, &skip, view::bg_color());
@@ -270,8 +280,29 @@ impl Editor {
         self.hide(HashSet::new(), HashSet::new());
     }
 
-    /// Selection, handles, things being dragged, caret, guides.
+    /// Applies the latest pointer position of a move or resize.
+    fn flush_drag(&mut self) {
+        if !std::mem::take(&mut self.drag_pending) {
+            return;
+        }
+        let t = Instant::now();
+        match self.mode {
+            Mode::Move { .. } => self.drag_move(),
+            Mode::Resize { .. } => self.drag_resize(),
+            _ => {}
+        }
+        if let Some(p) = std::env::var_os("HS_PROF") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
+                let _ = writeln!(f, "drag {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
+
+    /// Selection, handles, things being dragged, caret, guides. Called once
+    /// per frame, so it also applies a pending drag.
     pub fn refresh_overlay(&mut self) {
+        self.flush_drag();
         let mut ov = Scene::default();
         let px = self.px();
         let board = self.shown().clone();
@@ -684,12 +715,9 @@ impl Editor {
                 }
                 true
             }
-            Mode::Move { .. } => {
-                self.drag_move();
-                true
-            }
-            Mode::Resize { .. } => {
-                self.drag_resize();
+            // Pointers report faster than frames: the work waits for the frame.
+            Mode::Move { .. } | Mode::Resize { .. } => {
+                self.drag_pending = true;
                 true
             }
             Mode::Boxing { .. } | Mode::Connect { .. } | Mode::EdgeEnd { .. } => true,
@@ -710,7 +738,15 @@ impl Editor {
         for r in &roots {
             nodes.extend(self.board.subtree(r));
         }
-        let edges: HashSet<String> = self.board.edges.iter().filter(|e| e.kind == Kind::Link).map(|e| e.id.clone()).collect();
+        // Only connections of what moves follow it live (routing them all
+        // every frame is too slow on real boards); the rest re-route on drop.
+        let edges: HashSet<String> = self
+            .board
+            .edges
+            .iter()
+            .filter(|e| route::shown(&self.board, e, self.show_nested_links) && (nodes.contains(&e.from) || nodes.contains(&e.to)))
+            .map(|e| e.id.clone())
+            .collect();
         let start = self.engine.screen_to_world(at.x, at.y);
         self.mode = Mode::Move { start, roots, base: self.board.clone(), target: None, guides: Vec::new() };
         self.hide(nodes, edges);
@@ -865,16 +901,55 @@ impl Editor {
         for c in &changed {
             board.fit_ancestors(c, &one);
         }
+        let Mode::Resize { base, .. } = &self.mode else { return };
+        // What changed against the start of the drag: (id, old box, new box).
+        let mut moved: Vec<(String, Bbox, Bbox)> = Vec::new();
+        for n in &board.nodes {
+            if let Some(o) = base.get(&n.id) {
+                if o.bbox() != n.bbox() || o.font != n.font {
+                    moved.push((n.id.clone(), o.bbox(), n.bbox()));
+                }
+            }
+        }
         self.board = board;
-        self.rebuild_live();
+        self.rebuild_live(&moved);
     }
 
-    /// Rebuilds the scene during a drag that changes sizes (cheap at our scale).
-    fn rebuild_live(&mut self) {
-        self.rebuild();
+    /// Rebuilds the scene during a resize. A connection is routed again only
+    /// if one of its ends changed or a changed concept that can stand in its
+    /// way (not an ancestor of its ends) comes near its route; the release
+    /// does a full rebuild.
+    fn rebuild_live(&mut self, moved: &[(String, Bbox, Bbox)]) {
+        let touch = |a: &Bbox, b: &Bbox, m: f32| a[0] <= b[2] + m && a[2] >= b[0] - m && a[1] <= b[3] + m && a[3] >= b[1] - m;
+        let ends: HashSet<&str> = moved.iter().map(|m| m.0.as_str()).collect();
+        let board = &self.board;
+        let dirty: HashSet<String> = board
+            .edges
+            .iter()
+            .filter(|e| e.kind == Kind::Link)
+            .filter(|e| {
+                if ends.contains(e.from.as_str()) || ends.contains(e.to.as_str()) {
+                    return true;
+                }
+                let Some(p) = self.raw_routes.get(&e.id) else { return true };
+                let pb = route::path_box(p);
+                let margin = board.get(&e.from).map_or(0.0, |n| n.font) * 2.0;
+                let mut up: Vec<String> = board.ancestors(&e.from);
+                up.extend(board.ancestors(&e.to));
+                moved.iter().any(|(id, o, n)| !up.contains(id) && (touch(&pb, o, margin) || touch(&pb, n, margin)))
+            })
+            .map(|e| e.id.clone())
+            .collect();
+        self.raw_routes = route::raw_routes(&self.board, self.show_nested_links, Some(&dirty), &self.raw_routes);
+        self.routes = route::finish(&self.board, &self.raw_routes);
+        let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
+        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges };
+        let scene = view::build(&self.board, &self.routes, &m, &skip, view::bg_color());
+        self.engine.set_scene(scene);
     }
 
     pub fn release(&mut self) {
+        self.flush_drag();
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             Mode::Pan { moved: false, .. } => {
                 self.sel.clear();

@@ -145,6 +145,14 @@ pub extern "system" fn Java_com_hyperschema_app_Native_fit(_env: JNIEnv, _c: JCl
     app(h).ed.engine.fit();
 }
 
+/// Show connections between a concept and what is nested in it.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setNested(_env: JNIEnv, _c: JClass, h: jlong, on: jboolean) {
+    let a = app(h);
+    a.ed.show_nested_links = on != 0;
+    a.ed.rebuild();
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_hyperschema_app_Native_render(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
     let a = app(h);

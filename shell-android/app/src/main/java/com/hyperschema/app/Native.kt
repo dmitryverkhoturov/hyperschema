@@ -16,6 +16,7 @@ object Native {
     external fun editSelected(h: Long)
     external fun zoom(h: Long, f: Float, x: Float, y: Float)
     external fun fit(h: Long)
+    external fun setNested(h: Long, on: Boolean)
     external fun render(h: Long): Boolean
     /** action: 0 down, 1 move, 2 up, 3 cancel; t: event time, ms. */
     external fun touch(h: Long, action: Int, id: Long, x: Float, y: Float, t: Long)

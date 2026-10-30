@@ -397,6 +397,7 @@ impl ApplicationHandler for App {
             shown: false,
             restore,
         };
+        st.ed.show_nested_links = std::fs::read_to_string(data_dir().join("show-nested-links.txt")).is_ok_and(|s| s.trim() == "1");
 
         if let Some(n) = self.args.bench {
             st.ed.engine.set_scene(bench::generate(n));

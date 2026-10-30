@@ -324,11 +324,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         if (!ok) title.text = "${displayName(u)} · не сохраняется, откройте через ☰"
     }
 
+    private fun nestedLinks() = getPreferences(MODE_PRIVATE).getBoolean("nested", false)
+
     private fun showMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
         m.menu.add(0, 1, 0, "Открыть…")
         m.menu.add(0, 2, 1, "Новая схема…")
         m.menu.add(0, 3, 2, "Вписать всё")
+        m.menu.add(0, 4, 3, "Связи с вложенными").isCheckable = true
+        m.menu.findItem(4).isChecked = nestedLinks()
         m.setOnMenuItemClickListener {
             when (it.itemId) {
                 1 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_OPEN)
@@ -338,6 +342,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
                     REQ_NEW
                 )
                 3 -> call { Native.fit(handle) }
+                4 -> {
+                    val on = !nestedLinks()
+                    getPreferences(MODE_PRIVATE).edit().putBoolean("nested", on).apply()
+                    call { Native.setNested(handle, on) }
+                }
             }
             true
         }
@@ -498,6 +507,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
                         handle = hnd
                         creating = false
                         attached = hnd != 0L
+                        if (hnd != 0L && nestedLinks()) Native.setNested(hnd, true)
                         loadPending()
                         sync()
                     }

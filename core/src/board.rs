@@ -332,6 +332,11 @@ impl Board {
     pub fn has_children(&self, id: &str) -> bool {
         !self.children(id).is_empty()
     }
+    /// Top-level concepts, borrowed.
+    pub fn roots_ref(&self) -> Vec<&str> {
+        self.nodes.iter().filter(|n| !self.parent.contains_key(&n.id)).map(|n| n.id.as_str()).collect()
+    }
+
     pub fn roots(&self) -> Vec<String> {
         self.nodes.iter().filter(|n| !self.parent.contains_key(&n.id)).map(|n| n.id.clone()).collect()
     }
