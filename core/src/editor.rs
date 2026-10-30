@@ -186,6 +186,30 @@ impl Editor {
         self.dp() * if self.touch { 7.0 } else { 4.5 }
     }
 
+    /// Selected concepts whose ancestors are not selected too.
+    fn sel_roots(&self) -> Vec<String> {
+        let b = self.shown();
+        let sel: HashSet<&String> = self.sel.iter().collect();
+        self.sel.iter().filter(|id| b.get(id).is_some() && !b.ancestors(id).iter().any(|a| sel.contains(a))).cloned().collect()
+    }
+
+    /// What the resize handles frame: one concept, or the whole selection
+    /// (empty id) when several are selected.
+    fn handle_box(&self) -> Option<(String, Bbox)> {
+        if !self.handles_visible() {
+            return None;
+        }
+        match &self.sel[..] {
+            [] => None,
+            [one] => self.shown().get(one).map(|n| (one.clone(), n.bbox())),
+            _ => self.shown().bounds_of(self.sel_roots().iter()).map(|b| (String::new(), b)),
+        }
+    }
+
+    fn handle_pad(&self, id: &str) -> f32 {
+        self.dp() * if id.is_empty() { 10.0 } else { 4.0 }
+    }
+
     /// Concepts showing connection dots: the single selected one, and the
     /// hovered one with a mouse.
     fn dot_nodes(&self) -> Vec<String> {
@@ -279,10 +303,14 @@ impl Editor {
                 outline(&mut ov, n.bbox(), 4.0 * dp, blue(255), 1.5 * dp);
             }
         }
-        if let [one] = &self.sel[..] {
-            if let (Some(n), true) = (board.get(one), self.handles_visible()) {
+        if let Some((id, b)) = self.handle_box() {
+            let pad = self.handle_pad(&id);
+            if id.is_empty() {
+                outline(&mut ov, b, pad, blue(120), 1.0 * dp);
+            }
+            {
                 for h in self.handle_set() {
-                    let p = handle_pos(&n.bbox(), h, 4.0 * dp);
+                    let p = handle_pos(&b, h, pad);
                     let r = self.handle_r();
                     ov.rects.push(Rect { x: p.0 - r, y: p.1 - r, w: 2.0 * r, h: 2.0 * r, fill: rgba(255, 255, 255, 255), stroke: blue(255), stroke_w: 1.5 * px, radius: 0.0, shape: Shape::Rect });
                 }
@@ -397,14 +425,13 @@ impl Editor {
     pub fn hit(&self) -> Hit {
         let board = self.shown();
         let p = self.world();
-        let (dp, tol, reach) = (self.dp(), self.tol(), self.reach());
-        if let [one] = &self.sel[..] {
-            if let Some(n) = board.get(one) {
-                for h in self.handle_set() {
-                    let q = handle_pos(&n.bbox(), h, 4.0 * dp);
-                    if (q.0 - p.0).abs() < reach * 0.8 && (q.1 - p.1).abs() < reach * 0.8 {
-                        return Hit::Handle(one.clone(), h);
-                    }
+        let (tol, reach) = (self.tol(), self.reach());
+        if let Some((id, b)) = self.handle_box() {
+            let pad = self.handle_pad(&id);
+            for h in self.handle_set() {
+                let q = handle_pos(&b, h, pad);
+                if (q.0 - p.0).abs() < reach * 0.8 && (q.1 - p.1).abs() < reach * 0.8 {
+                    return Hit::Handle(id, h);
                 }
             }
         }
@@ -435,8 +462,22 @@ impl Editor {
                 return Hit::Node(n.id.clone());
             }
         }
-        let deepest = board.deepest_at(p.0, p.1, &HashSet::new());
-        // Connections, unless the pointer is clearly on a concept's own text.
+        // A concept under the pointer wins over a connection crossing it:
+        // a press usually means grabbing, and zoomed out connections cover
+        // much of the screen.
+        let under = match board.deepest_at(p.0, p.1, &HashSet::new()) {
+            None => Hit::Empty,
+            Some(id) => {
+                let n = board.node(&id);
+                let b = n.bbox();
+                let border = p.0 - b[0] < 1.5 * tol || b[2] - p.0 < 1.5 * tol || p.1 - b[1] < 1.5 * tol || b[3] - p.1 < 1.5 * tol;
+                let own = if board.has_children(&id) { p.1 < n.y + board.title_h(n, self.title_lines(n)) } else { !self.roomy_spot(n, p) };
+                if border || own {
+                    return Hit::Node(id);
+                }
+                Hit::Inside(id)
+            }
+        };
         for e in board.edges.iter().filter(|e| e.kind == Kind::Link) {
             if let Some(path) = self.routes.get(&e.id) {
                 if path.windows(2).any(|w| seg_dist(p, w[0], w[1]) < tol) {
@@ -444,19 +485,19 @@ impl Editor {
                 }
             }
         }
-        let Some(id) = deepest else { return Hit::Empty };
-        let n = board.node(&id);
-        if !board.has_children(&id) {
-            return Hit::Node(id);
+        under
+    }
+
+    /// A leaf big on screen has room for concepts inside: away from its
+    /// text it acts like a parent's empty inside (pan, double-click or long
+    /// press creates a nested concept).
+    fn roomy_spot(&self, n: &Node, p: Pt) -> bool {
+        if n.shape == NShape::Text || n.w.min(n.h) < 200.0 * self.dp() {
+            return false;
         }
-        let b = n.bbox();
-        let border = p.0 - b[0] < 1.5 * tol || b[2] - p.0 < 1.5 * tol || p.1 - b[1] < 1.5 * tol || b[3] - p.1 < 1.5 * tol;
-        let title = p.1 < n.y + board.title_h(n, self.title_lines(n));
-        if border || title {
-            Hit::Node(id)
-        } else {
-            Hit::Inside(id)
-        }
+        let lines = if n.text.is_empty() { 0 } else { self.lines(&n.text, n.font, (n.w - 2.0 * n.pad()).max(n.font)) };
+        let band = lines as f32 * LINE_H * n.font * 0.5 + n.font;
+        (p.1 - (n.y + n.h * 0.5)).abs() > band
     }
 
     /// A concept a connection from `from` may attach to, under the pointer.
@@ -559,7 +600,8 @@ impl Editor {
         let at = self.cursor;
         if double {
             match hit {
-                Hit::Node(id) | Hit::Handle(id, _) => self.start_text(TextTarget::Node(id), false),
+                Hit::Node(id) => self.start_text(TextTarget::Node(id), false),
+                Hit::Handle(id, _) if !id.is_empty() => self.start_text(TextTarget::Node(id), false),
                 Hit::Edge(e) | Hit::EdgeMid(e) | Hit::EdgeEnd(e, _) => self.start_text(TextTarget::Edge(e), false),
                 _ => self.mode = Mode::Press { at, node: None, double: true, edge_mid: None },
             }
@@ -737,84 +779,92 @@ impl Editor {
     fn drag_resize(&mut self) {
         let w = self.engine.screen_to_world(self.cursor.x, self.cursor.y);
         let shift = self.shift;
-        let lines = {
-            let Mode::Resize { id, base, .. } = &self.mode else { return };
-            self.title_lines(base.node(id))
-        };
+        let roots = self.sel_roots();
         let Mode::Resize { id, handle, base, start } = &self.mode else { return };
+        let (id, handle) = (id.clone(), *handle);
         let (dx, dy) = ((w.0 - start.0) as f32, (w.1 - start.1) as f32);
         let mut board = base.clone();
-        let n = base.node(id).clone();
-        let b0 = n.bbox();
-        let min = n.font * 1.5;
+        let b0 = if id.is_empty() { base.bounds_of(roots.iter()) } else { base.get(&id).map(|n| n.bbox()) };
+        let Some(b0) = b0 else { return };
+        // No floor tied to the text: the look shrinks with the box.
+        let (ow, oh) = (b0[2] - b0[0], b0[3] - b0[1]);
+        let (minw, minh) = (ow * 0.02, oh * 0.02);
         let mut nb = b0;
         if handle & L != 0 {
-            nb[0] = (b0[0] + dx).min(b0[2] - min);
+            nb[0] = (b0[0] + dx).min(b0[2] - minw);
         }
         if handle & R != 0 {
-            nb[2] = (b0[2] + dx).max(b0[0] + min);
+            nb[2] = (b0[2] + dx).max(b0[0] + minw);
         }
         if handle & T != 0 {
-            nb[1] = (b0[1] + dy).min(b0[3] - min);
+            nb[1] = (b0[1] + dy).min(b0[3] - minh);
         }
         if handle & B != 0 {
-            nb[3] = (b0[3] + dy).max(b0[1] + min);
+            nb[3] = (b0[3] + dy).max(b0[1] + minh);
         }
-        let (ow, oh) = (b0[2] - b0[0], b0[3] - b0[1]);
         let (nw, nh) = (nb[2] - nb[0], nb[3] - nb[1]);
         // Anchor: the opposite side stays put.
         let ax = if handle & L != 0 { b0[2] } else { b0[0] };
         let ay = if handle & T != 0 { b0[3] } else { b0[1] };
-        if shift {
-            // Pure scaling of the whole concept with everything inside.
-            let k = match (handle & (L | R) != 0, handle & (T | B) != 0) {
-                (true, true) => (nw / ow).max(nh / oh),
-                (true, false) => nw / ow,
-                _ => nh / oh,
+        let picture = match (handle & (L | R) != 0, handle & (T | B) != 0) {
+            (true, true) => (nw / ow).max(nh / oh),
+            (true, false) => nw / ow,
+            _ => nh / oh,
+        }
+        .max(0.02);
+        let changed: Vec<String> = if id.is_empty() {
+            // A group scales like a picture: concepts, text, gaps, contents.
+            for r in &roots {
+                board.scale_tree(r, picture, ax, ay);
             }
-            .max(0.02);
-            board.scale_tree(id, k, ax, ay);
-        } else if base.has_children(id) {
-            // Shrinking first takes the empty room (down to the content plus
-            // a margin), then scales what is inside. Growing adds room.
-            let kids = base.children(id).to_vec();
-            let cb = base.bounds_of(kids.iter()).unwrap();
-            let (gap, title) = (n.gap(), base.title_h(&n, lines));
-            let (cw, ch) = (cb[2] - cb[0], cb[3] - cb[1]);
-            let room_w = nw - 2.0 * gap;
-            let room_h = nh - title - gap;
-            let k = (room_w / cw).min(room_h / ch).min(1.0).max(0.02);
+            roots
+        } else if shift {
+            // Pure scaling of the whole concept with everything inside.
+            board.scale_tree(&id, picture, ax, ay);
+            vec![id]
+        } else {
+            // The concept's own look (text, outline, corners) follows its
+            // smaller side, so it never looks stretched or squashed. What is
+            // inside lives on its own: growing adds room, shrinking first
+            // takes the empty room, then scales the content.
+            let n = base.node(&id).clone();
             {
-                let node = board.get_mut(id).unwrap();
+                let node = board.get_mut(&id).unwrap();
                 node.x = nb[0];
                 node.y = nb[1];
                 node.w = nw;
                 node.h = nh;
+                node.font = n.font * (nw.min(nh) / ow.min(oh)).max(0.02);
             }
-            let cax = if handle & L != 0 { cb[2] } else { cb[0] };
-            let cay = if handle & T != 0 { cb[3] } else { cb[1] };
-            if k < 1.0 {
-                board.scale_children(id, k, cax, cay);
+            if base.has_children(&id) {
+                let nn = board.node(&id).clone();
+                let lines = view::title_lines(&nn, &|t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w));
+                let kids = base.children(&id).to_vec();
+                let cb = base.bounds_of(kids.iter()).unwrap();
+                let (gap, title) = (nn.gap(), board.title_h(&nn, lines));
+                let (cw, ch) = (cb[2] - cb[0], cb[3] - cb[1]);
+                let k = ((nw - 2.0 * gap) / cw).min((nh - title - gap) / ch).min(1.0).max(0.001);
+                let cax = if handle & L != 0 { cb[2] } else { cb[0] };
+                let cay = if handle & T != 0 { cb[3] } else { cb[1] };
+                if k < 1.0 {
+                    board.scale_children(&id, k, cax, cay);
+                }
+                // Keep the content inside the (possibly smaller) area.
+                let kb = board.bounds_of(kids.iter()).unwrap();
+                let area = [nb[0] + gap, nb[1] + title, nb[2] - gap, nb[3] - gap];
+                let sx = if kb[0] < area[0] { area[0] - kb[0] } else if kb[2] > area[2] { area[2] - kb[2] } else { 0.0 };
+                let sy = if kb[1] < area[1] { area[1] - kb[1] } else if kb[3] > area[3] { area[3] - kb[3] } else { 0.0 };
+                for c in &kids {
+                    board.move_tree(c, sx, sy);
+                }
             }
-            // Keep the content inside the (possibly smaller) area.
-            let kb = board.bounds_of(kids.iter()).unwrap();
-            let area = [nb[0] + gap, nb[1] + title, nb[2] - gap, nb[3] - gap];
-            let sx = if kb[0] < area[0] { area[0] - kb[0] } else if kb[2] > area[2] { area[2] - kb[2] } else { 0.0 };
-            let sy = if kb[1] < area[1] { area[1] - kb[1] } else if kb[3] > area[3] { area[3] - kb[3] } else { 0.0 };
-            for c in &kids {
-                board.move_tree(c, sx, sy);
-            }
-        } else {
-            let node = board.get_mut(id).unwrap();
-            node.x = nb[0];
-            node.y = nb[1];
-            node.w = nw;
-            node.h = nh;
-        }
-        let id = id.clone();
+            vec![id]
+        };
         let eng = &self.engine;
         let one = move |n: &Node| view::title_lines(n, &|t: &str, s: f32, w: f32| eng.wrapped_lines(t, s, w));
-        board.fit_ancestors(&id, &one);
+        for c in &changed {
+            board.fit_ancestors(c, &one);
+        }
         self.board = board;
         self.rebuild_live();
     }
@@ -971,6 +1021,32 @@ impl Editor {
         board.fit_ancestors(&id, &one);
         self.board = board;
         id
+    }
+
+    /// Adds another board next to what is here (to the right, tops
+    /// aligned), as one undo step, selects it and shows it.
+    pub fn merge_in(&mut self, other: Board) {
+        if other.nodes.is_empty() {
+            return;
+        }
+        self.commit_text();
+        let ob = other.bounds();
+        let (dx, dy) = if self.board.nodes.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let b = self.board.bounds();
+            let gap = ((b[2] - b[0]).max(ob[2] - ob[0])) * 0.1;
+            (b[2] + gap - ob[0], b[1] - ob[1])
+        };
+        self.begin();
+        let roots = self.board.merge(other, dx, dy);
+        self.commit();
+        self.sel = roots;
+        self.sel_edge = None;
+        self.rebuild();
+        if let Some(b) = self.board.bounds_of(self.sel.iter()) {
+            self.engine.fit_box(b, 0.85);
+        }
     }
 
     /// Double-click on empty canvas (or a parent's empty inside).

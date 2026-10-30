@@ -160,6 +160,8 @@ pub struct State {
     dm: Option<dm::Dm>,
     /// Touch screen gestures (shared with Android).
     fingers: Touch,
+    /// Finger that went down on the menu button.
+    menu_finger: Option<u64>,
     started: Instant,
     mods: ModifiersState,
     cursor_in: bool,
@@ -373,6 +375,7 @@ impl ApplicationHandler for App {
             window,
             dm,
             fingers: Touch::new(scale),
+            menu_finger: None,
             started: Instant::now(),
             mods: ModifiersState::default(),
             cursor_in: false,
@@ -452,6 +455,19 @@ impl ApplicationHandler for App {
                 let ms = st.started.elapsed().as_millis() as u64;
                 let (x, y) = (t.location.x, t.location.y);
                 match t.phase {
+                    // A finger on the menu button opens the menu when lifted.
+                    TouchPhase::Started if chrome::part_at(x, y) == Some(chrome::Part::Menu) => st.menu_finger = Some(t.id),
+                    _ if st.menu_finger == Some(t.id) => {
+                        if t.phase == TouchPhase::Ended {
+                            st.menu_finger = None;
+                            if !chrome::menu_just_closed() {
+                                st.commit_text();
+                                st.main_menu();
+                            }
+                        } else if t.phase == TouchPhase::Cancelled {
+                            st.menu_finger = None;
+                        }
+                    }
                     TouchPhase::Started => st.fingers.down(&mut st.ed, t.id, x, y, ms),
                     TouchPhase::Moved => st.fingers.moved(&mut st.ed, t.id, x, y, ms),
                     TouchPhase::Ended => st.fingers.up(&mut st.ed, t.id, x, y, ms),
@@ -477,8 +493,10 @@ impl ApplicationHandler for App {
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
                         if chrome::part_at(st.ed.cursor.x, st.ed.cursor.y) == Some(chrome::Part::Menu) {
-                            st.commit_text();
-                            st.main_menu();
+                            if !chrome::menu_just_closed() {
+                                st.commit_text();
+                                st.main_menu();
+                            }
                         } else if !st.timeline_press() {
                             st.press(alt, shift);
                         }

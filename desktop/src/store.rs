@@ -221,10 +221,28 @@ impl State {
         }
     }
 
+    /// Where a file dialog starts: the folder last picked in one, else the
+    /// open board's folder.
+    fn dialog_dir(&self) -> PathBuf {
+        std::fs::read_to_string(crate::data_dir().join("dialog-dir.txt"))
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|d| d.is_dir())
+            .or_else(|| self.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
+            .unwrap_or_default()
+    }
+
+    fn remember_dir(picked: &Path) {
+        if let Some(d) = picked.parent() {
+            let _ = std::fs::write(crate::data_dir().join("dialog-dir.txt"), d.to_string_lossy().as_bytes());
+        }
+    }
+
     pub fn new_board(&mut self) {
-        let dir = self.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_default();
+        let dir = self.dialog_dir();
         let pick = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("Новая схема.{EXT}")).add_filter("Hyperschema", &[EXT]).set_title("Новая схема").save_file();
         if let Some(p) = pick {
+            Self::remember_dir(&p);
             self.flush();
             if let Err(e) = self.create(&p, Board::new()) {
                 self.name = format!("не создалось: {e}");
@@ -233,27 +251,61 @@ impl State {
     }
 
     pub fn open_dialog(&mut self) {
-        let pick = rfd::FileDialog::new().add_filter("Схемы", &[EXT, "excalidraw", "md"]).set_title("Открыть схему").pick_file();
+        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).add_filter("Схемы", &[EXT, "excalidraw", "md"]).set_title("Открыть схему").pick_file();
         if let Some(p) = pick {
+            Self::remember_dir(&p);
             self.open(&p);
         }
     }
 
     /// Import again on demand, into a new board so nothing is overwritten.
+    /// Adds another board (ours or Excalidraw) to the open one. With
+    /// nothing open, an Excalidraw file becomes a new board next to it.
     pub fn import_dialog(&mut self) {
-        let pick = rfd::FileDialog::new().add_filter("Excalidraw", &["excalidraw", "md", "json"]).set_title("Импорт из Excalidraw").pick_file();
-        if let Some(src) = pick {
+        let pick = rfd::FileDialog::new()
+            .set_directory(self.dialog_dir())
+            .add_filter("Схемы", &[EXT, "excalidraw", "md", "json"])
+            .set_title("Добавить схему")
+            .pick_file();
+        let Some(src) = pick else { return };
+        Self::remember_dir(&src);
+        if self.path.is_none() {
             self.flush();
             let target = fresh_path(src.parent().unwrap_or(Path::new(".")), &stem(&src));
             if let Err(e) = self.import(&src, target) {
                 self.name = format!("не импортировалось: {e}");
             }
+            return;
+        }
+        self.add_board(&src);
+    }
+
+    /// Adds the board in `src` (ours or Excalidraw) to the open one.
+    pub fn add_board(&mut self, src: &Path) {
+        let other = std::fs::read_to_string(src).map_err(|e| e.to_string()).and_then(|text| {
+            if text.trim_start().starts_with('{') && text.contains("\"hyperschema\"") {
+                Board::parse(&text)
+            } else {
+                hs_core::import::from_excalidraw(&text).map(|x| x.0)
+            }
+        });
+        match other {
+            Ok(b) => {
+                self.ed.merge_in(b);
+                self.settle();
+            }
+            Err(e) => self.name = format!("{} — не добавилось: {e}", self.path.as_deref().map(stem).unwrap_or_default()),
         }
     }
 
     pub fn reveal(&self) {
         if let Some(p) = &self.path {
-            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
+            // Explorer parses its own command line: `/select,"path"` must reach
+            // it as is, while std would quote the whole argument (spaces in
+            // the path) and Explorer then ignores it.
+            use std::os::windows::process::CommandExt;
+            let abs = std::path::absolute(p).unwrap_or_else(|_| p.clone());
+            let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", abs.display())).spawn();
         }
     }
 
@@ -268,7 +320,7 @@ impl State {
             }
             items.push((-1, String::new(), false));
         }
-        items.extend([(3, "Импорт из Excalidraw…".into(), false), (0, String::new(), false), (4, "Показать в проводнике".into(), false), (5, "История…".into(), false)]);
+        items.extend([(3, "Добавить схему…".into(), false), (0, String::new(), false), (4, "Показать в проводнике".into(), false), (5, "История…".into(), false)]);
         match crate::chrome::popup(0.0, h, &items) {
             1 => self.new_board(),
             2 => self.open_dialog(),

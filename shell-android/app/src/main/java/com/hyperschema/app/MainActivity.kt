@@ -59,6 +59,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private lateinit var field: Field
     private var scheduled = false
     private var dirty = false
+    /** The file's text as we last read or wrote it: tells a sync's change from ours. */
+    private var lastText: String? = null
     private var pendingText: String? = null
     private var uri: Uri? = null
     private val ui = Handler(Looper.getMainLooper())
@@ -242,6 +244,22 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         }
     }
 
+    /** Back from another app (Obsidian syncing, say): pick up a changed file. */
+    override fun onResume() {
+        super.onResume()
+        val u = uri ?: return
+        if (handle == 0L || ui.hasCallbacks(saver) || !Native.editable(handle)) return
+        val text = readText(u) ?: return
+        if (text == lastText) return
+        if (Native.reload(handle, text)) {
+            lastText = text
+            sync()
+        }
+    }
+
+    private fun readText(u: Uri): String? =
+        runCatching { contentResolver.openInputStream(u)?.use { it.readBytes().toString(Charsets.UTF_8) } }.getOrNull()
+
     /** Opens what another app handed us; false if nothing came. */
     private fun readIntent(intent: Intent?): Boolean {
         val u: Uri? = when (intent?.action) {
@@ -258,12 +276,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     }
 
     private fun open(u: Uri) {
-        val text = runCatching { contentResolver.openInputStream(u)?.use { it.readBytes().toString(Charsets.UTF_8) } }.getOrNull()
+        val text = readText(u)
         if (text == null) {
             title.text = "не открылось"
             return
         }
         uri = u
+        lastText = text
         runCatching { contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         getPreferences(MODE_PRIVATE).edit().putString("last", u.toString()).apply()
         title.text = displayName(u)
@@ -292,7 +311,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         val u = uri ?: return
         if (handle == 0L || !Native.editable(handle)) return
         val text = Native.serialize(handle)
+        // Someone else's version (a sync) is about to be overwritten: keep a copy.
+        val disk = readText(u)
+        if (disk != null && lastText != null && disk != lastText) {
+            runCatching {
+                val dir = java.io.File(filesDir, "backups").apply { mkdirs() }
+                java.io.File(dir, "${displayName(u)} ${System.currentTimeMillis()}.hyperschema").writeText(disk)
+            }
+        }
         val ok = runCatching { contentResolver.openOutputStream(u, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null }.getOrDefault(false)
+        if (ok) lastText = text
         if (!ok) title.text = "${displayName(u)} · не сохраняется, откройте через ☰"
     }
 

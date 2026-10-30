@@ -208,7 +208,7 @@ fn now_ms() -> u64 {
 impl Board {
     pub fn new() -> Board {
         let mut b = Board { rng: now_ms() | 1, ..Default::default() };
-        b.extra.insert("dimensions".into(), json!([{ "id": "main", "name": "Основной", "nest": "contains" }]));
+        b.extra.insert("dimensions".into(), json!([{ "id": "main", "name": "Main", "nest": "contains" }]));
         b
     }
 
@@ -419,6 +419,35 @@ impl Board {
     pub fn add_node(&mut self, n: Node) {
         self.nodes.push(n);
         self.reindex();
+    }
+
+    /// Adds another board's concepts and connections, shifted by (dx, dy),
+    /// under fresh ids so nothing here is replaced. Returns the new ids of
+    /// its top-level concepts.
+    pub fn merge(&mut self, other: Board, dx: f32, dy: f32) -> Vec<String> {
+        let roots: HashSet<String> = other.roots().into_iter().collect();
+        let mut map: HashMap<String, String> = HashMap::new();
+        let mut new_roots = Vec::new();
+        for mut n in other.nodes {
+            let id = self.new_id();
+            if roots.contains(&n.id) {
+                new_roots.push(id.clone());
+            }
+            map.insert(std::mem::replace(&mut n.id, id), n.id.clone());
+            n.x += dx;
+            n.y += dy;
+            self.idx.insert(n.id.clone(), usize::MAX);
+            self.nodes.push(n);
+        }
+        for mut e in other.edges {
+            let (Some(f), Some(t)) = (map.get(&e.from), map.get(&e.to)) else { continue };
+            e.from = f.clone();
+            e.to = t.clone();
+            e.id = self.new_id();
+            self.edges.push(e);
+        }
+        self.reindex();
+        new_roots
     }
 
     pub fn add_edge(&mut self, from: &str, to: &str, kind: Kind) -> String {

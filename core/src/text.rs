@@ -1,13 +1,20 @@
 //! Text: lazy per-label layout in em units + an R8 glyph atlas rasterised at
-//! a few fixed pixel sizes. A glyph quad lives in world space and only
-//! changes when the size bucket or the visible set changes, not per frame.
+//! a few fixed pixel sizes. Above the largest size glyphs come from a signed
+//! distance field, so close-up text stays sharp instead of blowing up the
+//! biggest bitmap. A glyph quad lives in world space and only changes when
+//! the size bucket or the visible set changes, not per frame.
 
 use crate::scene::{Align, Label};
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont};
 use std::collections::HashMap;
 
 pub const ATLAS: u32 = 2048;
-pub const BUCKETS: [f32; 9] = [10.0, 14.0, 20.0, 28.0, 40.0, 56.0, 80.0, 112.0, 160.0];
+pub const BUCKETS: [f32; 10] = [10.0, 14.0, 20.0, 28.0, 40.0, 56.0, 80.0, 112.0, 160.0, SDF_PX];
+/// The last bucket: a distance field rasterised at this size.
+pub const SDF_PX: f32 = 128.0;
+const SDF_BUCKET: u8 = 9;
+/// Distance field reach in raster pixels on each side of the outline.
+pub const SDF_SPREAD: f32 = 16.0;
 pub const LINE_H: f32 = 1.25;
 
 #[derive(Clone, Copy)]
@@ -16,6 +23,8 @@ pub struct AtlasGlyph {
     /// Pixel bounds relative to the pen position at bucket size.
     pub min: [f32; 2],
     pub size: [f32; 2],
+    /// Distance field rather than coverage.
+    pub sdf: bool,
 }
 
 pub struct Layout {
@@ -145,7 +154,7 @@ impl Text {
     }
 
     pub fn bucket_for(px: f32) -> u8 {
-        BUCKETS.iter().position(|&b| b >= px * 0.95).unwrap_or(BUCKETS.len() - 1) as u8
+        BUCKETS[..SDF_BUCKET as usize].iter().position(|&b| b >= px * 0.95).unwrap_or(SDF_BUCKET as usize) as u8
     }
 
     /// Glyph in the atlas, rasterising it on first use. `Err` = atlas full.
@@ -160,7 +169,10 @@ impl Text {
             return Ok(None);
         };
         let b = outline.px_bounds();
-        let (w, h) = (b.width() as u32 + 2, b.height() as u32 + 2);
+        let sdf = bucket == SDF_BUCKET;
+        let pad = if sdf { SDF_SPREAD as u32 } else { 0 };
+        let (gw, gh) = (b.width() as u32 + 2 * pad, b.height() as u32 + 2 * pad);
+        let (w, h) = (gw + 2, gh + 2);
         if self.shelf_x + w > ATLAS {
             self.shelf_x = 0;
             self.shelf_y += self.shelf_h;
@@ -170,20 +182,35 @@ impl Text {
             return Err(());
         }
         let (ox, oy) = (self.shelf_x + 1, self.shelf_y + 1);
-        outline.draw(|x, y, c| {
-            let i = ((oy + y) * ATLAS + ox + x) as usize;
-            self.pixels[i] = (c.clamp(0.0, 1.0) * 255.0) as u8;
-        });
+        if sdf {
+            let segs = outline_segments(&self.font, g, px);
+            let origin = (b.min.x - pad as f32, b.min.y - pad as f32);
+            for y in 0..gh {
+                for x in 0..gw {
+                    let d = signed_distance(&segs, (origin.0 + x as f32 + 0.5, origin.1 + y as f32 + 0.5));
+                    let v = (0.5 + d / (2.0 * SDF_SPREAD)).clamp(0.0, 1.0);
+                    self.pixels[((oy + y) * ATLAS + ox + x) as usize] = (v * 255.0).round() as u8;
+                }
+            }
+        } else {
+            outline.draw(|x, y, c| {
+                let i = ((oy + y) * ATLAS + ox + x) as usize;
+                self.pixels[i] = (c.clamp(0.0, 1.0) * 255.0) as u8;
+            });
+        }
         self.shelf_x += w;
         self.shelf_h = self.shelf_h.max(h);
         let d = self.dirty.get_or_insert((oy, oy + h));
         d.0 = d.0.min(oy - 1);
         d.1 = d.1.max(oy + h);
         let a = ATLAS as f32;
+        let p = pad as f32;
+        let (sw, sh) = (b.width() + 2.0 * p, b.height() + 2.0 * p);
         let e = AtlasGlyph {
-            uv: [ox as f32 / a, oy as f32 / a, (ox as f32 + b.width()) / a, (oy as f32 + b.height()) / a],
-            min: [b.min.x, b.min.y],
-            size: [b.width(), b.height()],
+            uv: [ox as f32 / a, oy as f32 / a, (ox as f32 + sw) / a, (oy as f32 + sh) / a],
+            min: [b.min.x - p, b.min.y - p],
+            size: [sw, sh],
+            sdf,
         };
         self.glyphs.insert((g, bucket), Some(e));
         Ok(Some(e))
@@ -191,5 +218,73 @@ impl Text {
 
     pub fn clear_atlas(&mut self) {
         self.reset_atlas();
+    }
+}
+
+type Seg = ((f32, f32), (f32, f32));
+
+/// The glyph outline at `px` as line segments in pixel space (y down, pen
+/// at the origin), curves flattened.
+fn outline_segments(font: &FontArc, g: GlyphId, px: f32) -> Vec<Seg> {
+    let Some(o) = font.outline(g) else { return Vec::new() };
+    let sf = font.as_scaled(PxScale::from(px)).scale_factor();
+    let tp = |p: ab_glyph::Point| (p.x * sf.horizontal, -p.y * sf.vertical);
+    let mut segs = Vec::new();
+    let mut poly = |pts: &mut dyn Iterator<Item = (f32, f32)>| {
+        let mut prev: Option<(f32, f32)> = None;
+        for q in pts {
+            if let Some(p) = prev {
+                segs.push((p, q));
+            }
+            prev = Some(q);
+        }
+    };
+    for c in &o.curves {
+        match *c {
+            ab_glyph::OutlineCurve::Line(a, b) => poly(&mut [tp(a), tp(b)].into_iter()),
+            ab_glyph::OutlineCurve::Quad(a, b, c) => {
+                let (a, b, c) = (tp(a), tp(b), tp(c));
+                poly(&mut (0..=8).map(|i| {
+                    let t = i as f32 / 8.0;
+                    let u = 1.0 - t;
+                    (u * u * a.0 + 2.0 * u * t * b.0 + t * t * c.0, u * u * a.1 + 2.0 * u * t * b.1 + t * t * c.1)
+                }));
+            }
+            ab_glyph::OutlineCurve::Cubic(a, b, c, d) => {
+                let (a, b, c, d) = (tp(a), tp(b), tp(c), tp(d));
+                poly(&mut (0..=12).map(|i| {
+                    let t = i as f32 / 12.0;
+                    let u = 1.0 - t;
+                    let (k0, k1, k2, k3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                    (k0 * a.0 + k1 * b.0 + k2 * c.0 + k3 * d.0, k0 * a.1 + k1 * b.1 + k2 * c.1 + k3 * d.1)
+                }));
+            }
+        }
+    }
+    segs
+}
+
+/// Distance from `p` to the outline, positive inside (non-zero winding).
+fn signed_distance(segs: &[Seg], p: (f32, f32)) -> f32 {
+    let mut best = f32::INFINITY;
+    let mut wind = 0i32;
+    for &(a, b) in segs {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let (ex, ey) = (a.0 + dx * t - p.0, a.1 + dy * t - p.1);
+        best = best.min(ex * ex + ey * ey);
+        if (a.1 > p.1) != (b.1 > p.1) {
+            let x = a.0 + (p.1 - a.1) / dy * dx;
+            if x > p.0 {
+                wind += if dy > 0.0 { 1 } else { -1 };
+            }
+        }
+    }
+    let d = best.sqrt();
+    if wind != 0 {
+        d
+    } else {
+        -d
     }
 }

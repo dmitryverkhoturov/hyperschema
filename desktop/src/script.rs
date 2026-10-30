@@ -122,6 +122,7 @@ impl State {
                 self.ed.engine.zoom_at(1.18f64.powf(n(1)), x, y);
             }
             "fit" => self.ed.engine.fit(),
+            "import" => self.add_board(std::path::Path::new(line.splitn(2, ' ').nth(1).unwrap_or(""))),
             "screen" => {
                 // World coordinates = window pixels, for writing tests.
                 let (w, h) = self.ed.engine.size();

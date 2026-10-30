@@ -219,14 +219,142 @@ pub fn route_between(board: &Board, a: &Node, b: &Node) -> Vec<Pt> {
     clip(&path, &a.bbox(), &b.bbox())
 }
 
-/// Routes of every visible connection.
+/// Routes of every visible connection, with overlapping ones pulled apart.
 pub fn route_all(board: &Board) -> HashMap<String, Vec<Pt>> {
-    board
-        .edges
-        .iter()
-        .filter(|e| e.kind == Kind::Link)
-        .filter_map(|e| Some((e.id.clone(), route_between(board, board.get(&e.from)?, board.get(&e.to)?))))
+    let mut ids = Vec::new();
+    let mut paths = Vec::new();
+    let mut gaps = Vec::new();
+    let mut ends = Vec::new();
+    for e in board.edges.iter().filter(|e| e.kind == Kind::Link) {
+        let (Some(a), Some(b)) = (board.get(&e.from), board.get(&e.to)) else { continue };
+        ids.push(e.id.clone());
+        paths.push(route_between(board, a, b));
+        gaps.push(a.font.min(b.font) * 0.6);
+        ends.push((a.bbox(), b.bbox()));
+    }
+    separate(&mut paths, &gaps, &ends);
+    ids.into_iter().zip(paths).collect()
+}
+
+/// Connections that run on top of each other get lanes: each shifts
+/// sideways by its lane times `gaps[i]`, then is cut at its ends' borders
+/// again. Neighbours in a conflict never share a lane on the same side.
+fn separate(paths: &mut [Vec<Pt>], gaps: &[f32], ends: &[(Bbox, Bbox)]) {
+    let n = paths.len();
+    if n < 2 {
+        return;
+    }
+    // Segments in a coarse grid; only segments sharing a cell are compared.
+    let cell = gaps.iter().copied().fold(0.0f32, f32::max).max(1e-3) * 8.0;
+    let mut grid: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    for (i, p) in paths.iter().enumerate() {
+        for k in 0..p.len().saturating_sub(1) {
+            let (a, b) = (p[k], p[k + 1]);
+            let (x0, x1) = ((a.0.min(b.0) / cell).floor() as i32, (a.0.max(b.0) / cell).floor() as i32);
+            let (y0, y1) = ((a.1.min(b.1) / cell).floor() as i32, (a.1.max(b.1) / cell).floor() as i32);
+            if (x1 - x0 + 1) * (y1 - y0 + 1) > 4096 {
+                continue;
+            }
+            for gx in x0..=x1 {
+                for gy in y0..=y1 {
+                    grid.entry((gx, gy)).or_default().push((i, k));
+                }
+            }
+        }
+    }
+    // Conflicts: (other route, same direction?).
+    let mut conf: Vec<HashMap<usize, bool>> = vec![HashMap::new(); n];
+    for list in grid.values() {
+        for (x, &(i, k)) in list.iter().enumerate() {
+            for &(j, m) in &list[x + 1..] {
+                if i == j || conf[i].contains_key(&j) {
+                    continue;
+                }
+                let tol = gaps[i].min(gaps[j]) * 0.6;
+                if let Some(same) = overlap((paths[i][k], paths[i][k + 1]), (paths[j][m], paths[j][m + 1]), tol) {
+                    conf[i].insert(j, same);
+                    conf[j].insert(i, same);
+                }
+            }
+        }
+    }
+    if conf.iter().all(|c| c.is_empty()) {
+        return;
+    }
+    // Lanes 0, 1, -1, 2, -2...: the first free one, seen from this route.
+    let mut lane: Vec<Option<i32>> = vec![None; n];
+    let mut order: Vec<usize> = (0..n).filter(|&i| !conf[i].is_empty()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(conf[i].len()));
+    for &i in &order {
+        let used: HashSet<i32> = conf[i].iter().filter_map(|(&j, &same)| lane[j].map(|l| if same { l } else { -l })).collect();
+        let l = (0..).map(|k: i32| if k % 2 == 1 { (k + 1) / 2 } else { -(k / 2) }).find(|l| !used.contains(l)).unwrap();
+        lane[i] = Some(l);
+    }
+    for i in 0..n {
+        let Some(l) = lane[i].filter(|&l| l != 0) else { continue };
+        let shifted = offset(&paths[i], l as f32 * gaps[i]);
+        let (a, b) = ends[i];
+        paths[i] = reclip(&shifted, &a, &b);
+    }
+}
+
+/// Some(same direction) if two segments run along each other closer than
+/// `tol` for more than `tol`.
+fn overlap(s: (Pt, Pt), t: (Pt, Pt), tol: f32) -> Option<bool> {
+    let (la, lb) = (dist(s.0, s.1), dist(t.0, t.1));
+    if la < tol || lb < tol {
+        return None;
+    }
+    let u = ((s.1 .0 - s.0 .0) / la, (s.1 .1 - s.0 .1) / la);
+    let v = ((t.1 .0 - t.0 .0) / lb, (t.1 .1 - t.0 .1) / lb);
+    if (u.0 * v.1 - u.1 * v.0).abs() > 0.06 {
+        return None;
+    }
+    let side = |p: Pt| ((p.0 - s.0 .0) * u.1 - (p.1 - s.0 .1) * u.0).abs();
+    if side(t.0) > tol || side(t.1) > tol {
+        return None;
+    }
+    let along = |p: Pt| (p.0 - s.0 .0) * u.0 + (p.1 - s.0 .1) * u.1;
+    let (p0, p1) = (along(t.0).min(along(t.1)), along(t.0).max(along(t.1)));
+    (p1.min(la) - p0.max(0.0) > tol).then_some(u.0 * v.0 + u.1 * v.1 > 0.0)
+}
+
+/// The polyline moved sideways by `d` (left of its direction), each point
+/// along the average normal of its two segments.
+fn offset(p: &[Pt], d: f32) -> Vec<Pt> {
+    let normal = |a: Pt, b: Pt| {
+        let l = dist(a, b).max(1e-6);
+        (-(b.1 - a.1) / l, (b.0 - a.0) / l)
+    };
+    (0..p.len())
+        .map(|i| {
+            let n0 = if i > 0 { normal(p[i - 1], p[i]) } else { normal(p[0], p[1]) };
+            let n1 = if i + 1 < p.len() { normal(p[i], p[i + 1]) } else { n0 };
+            let (nx, ny) = (n0.0 + n1.0, n0.1 + n1.1);
+            let l = nx.hypot(ny).max(1e-6);
+            // Keep the offset distance on turns (miter), capped for sharp ones.
+            let k = d * (2.0 / l).min(2.0);
+            (p[i].0 + nx / l * k, p[i].1 + ny / l * k)
+        })
         .collect()
+}
+
+/// Extends both ends back into their boxes and cuts at the borders again,
+/// so a shifted connection still touches its concepts.
+fn reclip(p: &[Pt], a: &Bbox, b: &Bbox) -> Vec<Pt> {
+    if p.len() < 2 {
+        return p.to_vec();
+    }
+    let ext = |from: Pt, towards: Pt, r: &Bbox| {
+        let l = dist(from, towards).max(1e-6);
+        let k = ((r[2] - r[0]).min(r[3] - r[1]) * 0.45) / l;
+        (from.0 - (towards.0 - from.0) * k, from.1 - (towards.1 - from.1) * k)
+    };
+    let mut q = Vec::with_capacity(p.len() + 2);
+    q.push(ext(p[0], p[1], a));
+    q.extend_from_slice(p);
+    q.push(ext(p[p.len() - 1], p[p.len() - 2], b));
+    clip(&q, a, b)
 }
 
 #[cfg(test)]
@@ -240,6 +368,17 @@ mod tests {
         assert!(p.len() > 2);
         assert!(p.iter().all(|q| !inside(*q, &[40.0, -10.0, 60.0, 40.0])));
         assert!(p.windows(2).all(|w| !crosses(w[0], w[1], &[40.0, -10.0, 60.0, 40.0])));
+    }
+
+    #[test]
+    fn parallel_connections_get_apart() {
+        let a = [-10.0, -10.0, 10.0, 10.0];
+        let b = [90.0, -10.0, 110.0, 10.0];
+        let mut paths = vec![vec![(10.0, 0.0), (90.0, 0.0)], vec![(90.0, 0.0), (10.0, 0.0)]];
+        separate(&mut paths, &[4.0, 4.0], &[(a, b), (b, a)]);
+        let y = |p: &Vec<Pt>| p[p.len() / 2].1;
+        assert!((y(&paths[0]) - y(&paths[1])).abs() > 3.0, "{paths:?}");
+        assert!(paths.iter().all(|p| p.len() >= 2));
     }
 
     #[test]

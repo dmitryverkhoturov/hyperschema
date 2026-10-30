@@ -25,6 +25,14 @@ static WIDTH: AtomicI32 = AtomicI32::new(0);
 static HOVER: AtomicU32 = AtomicU32::new(0);
 static PRESSED: AtomicU32 = AtomicU32::new(0);
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
+/// When the last popup menu closed.
+static MENU_CLOSED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// True right after a popup closed: the click that closed it by landing on
+/// the menu button must not open it again.
+pub fn menu_just_closed() -> bool {
+    MENU_CLOSED.lock().ok().and_then(|g| *g).is_some_and(|t| t.elapsed().as_millis() < 250)
+}
 
 fn scale() -> f64 {
     SCALE_X100.load(Ordering::Relaxed) as f64 / 100.0
@@ -281,8 +289,15 @@ pub fn popup(x: f64, y: f64, items: &[(i32, String, bool)]) -> i32 {
         }
         let mut p = POINT { x: x as i32, y: y as i32 };
         let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd(), &mut p);
+        // Without the window in front a click outside does not close the
+        // menu; the posted no-op lets the menu loop notice it is done.
+        let _ = SetForegroundWindow(hwnd());
         let r = TrackPopupMenu(root, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, p.x, p.y, Some(0), hwnd(), None);
+        let _ = PostMessageW(Some(hwnd()), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(root);
+        if let Ok(mut g) = MENU_CLOSED.lock() {
+            *g = Some(std::time::Instant::now());
+        }
         r.0
     }
 }

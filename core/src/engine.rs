@@ -44,7 +44,9 @@ struct GlyphGpu {
     xywh: [f32; 4],
     uv: [f32; 4],
     color: u32,
-    _pad: [u32; 3],
+    /// 1 = the atlas holds a distance field for this glyph.
+    sdf: u32,
+    _pad: [u32; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -370,7 +372,7 @@ impl Engine {
             "vs_glyph",
             "fs_glyph",
             48,
-            &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Uint32],
+            &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Uint32, 3 => Uint32],
         );
 
         Engine {
@@ -567,7 +569,8 @@ impl Engine {
                     ],
                     uv: ag.uv,
                     color: label.color,
-                    _pad: [0; 3],
+                    sdf: ag.sdf as u32,
+                    _pad: [0; 2],
                 });
             }
         }
@@ -658,10 +661,15 @@ impl Engine {
 
     pub fn fit(&mut self) {
         let b = self.scene.bounds();
+        self.fit_box(b, 0.92);
+    }
+
+    /// Shows world box `b` filling `fill` of the window.
+    pub fn fit_box(&mut self, b: [f32; 4], fill: f64) {
         let (w, h) = (self.config.width as f64, self.config.height as f64);
         let bw = (b[2] - b[0]).max(1.0) as f64;
         let bh = (b[3] - b[1]).max(1.0) as f64;
-        self.cam.s = ((w / bw).min(h / bh) * 0.92).clamp(MIN_SCALE, MAX_SCALE);
+        self.cam.s = ((w / bw).min(h / bh) * fill).clamp(MIN_SCALE, MAX_SCALE);
         self.cam.cx = (b[0] as f64 + b[2] as f64) * 0.5;
         self.cam.cy = (b[1] as f64 + b[3] as f64) * 0.5;
     }
@@ -750,7 +758,8 @@ impl Engine {
                                 xywh: [label.x + off, label.y + (j as f32 * LINE_H + 0.4) * label.size, w, label.size * 0.5],
                                 uv: self.text.white_uv,
                                 color,
-                                _pad: [0; 3],
+                                sdf: 0,
+                                _pad: [0; 2],
                             });
                         }
                         continue;
@@ -774,7 +783,8 @@ impl Engine {
                                     xywh: [ox, oy, ag.size[0] * ratio, ag.size[1] * ratio],
                                     uv: ag.uv,
                                     color,
-                                    _pad: [0; 3],
+                                    sdf: ag.sdf as u32,
+                                    _pad: [0; 2],
                                 });
                             }
                         }

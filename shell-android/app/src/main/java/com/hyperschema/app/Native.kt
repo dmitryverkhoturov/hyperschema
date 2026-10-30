@@ -22,6 +22,7 @@ object Native {
     external fun tick(h: Long, t: Long): Boolean
     external fun poll(h: Long): String
     external fun load(h: Long, text: String): String?
+    external fun reload(h: Long, text: String): Boolean
     external fun editable(h: Long): Boolean
     external fun serialize(h: Long): String
     external fun setText(h: Long, text: String)

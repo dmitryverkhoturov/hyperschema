@@ -180,12 +180,14 @@ struct GlyphIn {
     @location(0) xywh: vec4<f32>,
     @location(1) uv: vec4<f32>,
     @location(2) color: u32,
+    @location(3) sdf: u32,
 };
 
 struct GlyphOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) sdf: u32,
 };
 
 @vertex
@@ -196,11 +198,26 @@ fn vs_glyph(@builtin(vertex_index) vi: u32, g: GlyphIn) -> GlyphOut {
     o.pos = to_clip(to_screen(w));
     o.uv = mix(g.uv.xy, g.uv.zw, c);
     o.color = unpack(g.color);
+    o.sdf = g.sdf;
     return o;
 }
 
+// Distance field reach in raster pixels (text.rs SDF_SPREAD).
+const SDF_SPREAD: f32 = 16.0;
+
 @fragment
 fn fs_glyph(i: GlyphOut) -> @location(0) vec4<f32> {
-    let a = textureSample(atlas, samp, i.uv).r * i.color.a;
+    let v = textureSample(atlas, samp, i.uv).r;
+    // Distance field: distance in raster pixels, edge width from how fast it
+    // changes on screen. Derivatives are taken outside the branch.
+    let d = (v - 0.5) * 2.0 * SDF_SPREAD;
+    // Capped: only magnified glyphs use the field, and the helper pixels
+    // past a quad's edge must not smear its border into a faint frame.
+    let fw = clamp(length(vec2<f32>(dpdx(d), dpdy(d))), 1e-4, 1.5);
+    var cov = v;
+    if (i.sdf == 1u) {
+        cov = clamp(d / fw + 0.5, 0.0, 1.0);
+    }
+    let a = cov * i.color.a;
     return vec4<f32>(i.color.rgb * a, a);
 }

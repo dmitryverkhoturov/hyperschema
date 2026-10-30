@@ -239,6 +239,27 @@ pub extern "system" fn Java_com_hyperschema_app_Native_load(mut env: JNIEnv, _c:
     }
 }
 
+/// The file changed elsewhere (sync) while we were away: take the new
+/// version, keep where the camera looks.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_reload(mut env: JNIEnv, _c: JClass, h: jlong, text: JString) -> jboolean {
+    let text = jstr(&mut env, &text);
+    let a = app(h);
+    if !a.editable {
+        return 0;
+    }
+    match Board::parse(&text) {
+        Ok(b) => {
+            let cam = a.ed.engine.cam;
+            a.ed.load(b);
+            a.ed.engine.cam = cam;
+            a.menu = None;
+            1
+        }
+        Err(_) => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_hyperschema_app_Native_editable(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
     app(h).editable as jboolean
