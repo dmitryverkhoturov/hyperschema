@@ -763,7 +763,7 @@ impl ApplicationHandler for App {
                     }
                     b.last = Some(now);
                 }
-                if st.auto.is_some() || touchpad_busy || gliding || st.animating() || !drawn {
+                if st.auto.is_some() || touchpad_busy || gliding || st.animating() || st.ed.search.is_some() || !drawn {
                     st.window.request_redraw();
                 }
             }

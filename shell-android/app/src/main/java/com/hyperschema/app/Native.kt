@@ -34,4 +34,12 @@ object Native {
     external fun edgeChoice(h: Long, choice: Int)
     external fun createCenter(h: Long)
     external fun stats(h: Long): String
+    /** See `NODE_*` in core/src/editor.rs. */
+    external fun nodeChoice(h: Long, choice: Int)
+    external fun copySelection(h: Long): String?
+    external fun selectionText(h: Long): String?
+    external fun paste(h: Long, board: String, text: String)
+    /** step: 0 new query, 1 next, -1 previous. Returns "current\tcount". */
+    external fun search(h: Long, query: String, step: Int): String
+    external fun searchClose(h: Long)
 }

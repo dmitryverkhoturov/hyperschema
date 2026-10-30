@@ -1,6 +1,8 @@
 package com.hyperschema.app
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -27,6 +29,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -73,6 +76,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private var barKind = ""
     /** Screen box of the selection (or of the concept being typed into). */
     private var selBox: List<Float>? = null
+    /** Selection style from the core: fill index (-1 other), shape, holds others, count. */
+    private var style: List<Int> = listOf(-1, 0, 0, 1)
+    /** The selection bar shows the colour dots instead of its commands. */
+    private var pickingColor = false
+    private lateinit var searchBox: LinearLayout
+    private lateinit var searchField: EditText
+    private lateinit var searchCount: TextView
 
     private val ink = Color.rgb(30, 30, 30)
     private val canvasBg = Color.rgb(247, 246, 243)
@@ -138,10 +148,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             addView(menu, LinearLayout.LayoutParams(b, b))
             addView(title)
         }
+        val searchBtn = round("⌕", 22f, glass, ink) { openSearch() }
         undoBtn = round("↶", 20f, glass, ink) { call { Native.undo(handle, false) } }
         redoBtn = round("↷", 20f, glass, ink) { call { Native.undo(handle, true) } }
         val right = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            addView(searchBtn, LinearLayout.LayoutParams(b, b))
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(dp(8f).toInt(), 1))
             addView(undoBtn, LinearLayout.LayoutParams(b, b))
             addView(View(this@MainActivity), LinearLayout.LayoutParams(dp(8f).toInt(), 1))
             addView(redoBtn, LinearLayout.LayoutParams(b, b))
@@ -165,6 +178,44 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             setPadding(dp(6f).toInt(), 0, dp(6f).toInt(), 0)
         }
         root.addView(bar, FrameLayout.LayoutParams(-2, dp(44f).toInt()))
+
+        // Search: a field with the match count, previous, next, close.
+        searchField = EditText(this).apply {
+            hint = "Поиск по схеме"
+            textSize = 15f
+            background = null
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            setPadding(dp(14f).toInt(), 0, dp(4f).toInt(), 0)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: Editable?) = search(0)
+            })
+            setOnEditorActionListener { _, _, _ -> search(1); true }
+        }
+        searchCount = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(120, 120, 120))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        searchBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(22f)
+                setColor(Color.WHITE)
+                setStroke(dp(1f).toInt(), Color.argb(24, 0, 0, 0))
+            }
+            elevation = dp(6f)
+            visibility = View.GONE
+            addView(searchField, LinearLayout.LayoutParams(0, -1, 1f))
+            addView(searchCount, LinearLayout.LayoutParams(-2, -1))
+            addView(plainButton("‹") { search(-1) }, LinearLayout.LayoutParams(-2, -1))
+            addView(plainButton("›") { search(1) }, LinearLayout.LayoutParams(-2, -1))
+            addView(plainButton("✕") { closeSearch() }, LinearLayout.LayoutParams(-2, -1))
+        }
+        root.addView(searchBox, FrameLayout.LayoutParams(-1, dp(44f).toInt(), Gravity.TOP))
 
         field = Field(this).apply {
             alpha = 0f
@@ -192,7 +243,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             (left.layoutParams as FrameLayout.LayoutParams).setMargins(m + sys.left, m + sys.top, 0, 0)
             (right.layoutParams as FrameLayout.LayoutParams).setMargins(0, m + sys.top, m + sys.right, 0)
             (plusBtn.layoutParams as FrameLayout.LayoutParams).setMargins(0, 0, dp(18f).toInt() + sys.right, dp(18f).toInt() + sys.bottom)
-            left.requestLayout(); right.requestLayout(); plusBtn.requestLayout()
+            (searchBox.layoutParams as FrameLayout.LayoutParams).setMargins(m + sys.left, m + sys.top + dp(52f).toInt(), m + sys.right, 0)
+            left.requestLayout(); right.requestLayout(); plusBtn.requestLayout(); searchBox.requestLayout()
             keepTypingVisible()
             insets
         }
@@ -225,6 +277,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         val g = intent.getStringExtra("gest")
         if (g != null) {
             debugGesture(g, intent.getFloatExtra("x", 540f), intent.getFloatExtra("y", 1200f), intent.getFloatExtra("dx", 0f), intent.getFloatExtra("dy", 300f))
+            return
+        }
+        intent.getStringExtra("act")?.let { a ->
+            // Debug: nc:N (selection bar choice), copy, paste, find:TEXT, next.
+            when {
+                a.startsWith("nc:") -> call { Native.nodeChoice(handle, a.substring(3).toInt()) }
+                a == "copy" -> copySelection()
+                a == "paste" -> paste()
+                a.startsWith("find:") -> { openSearch(); searchField.setText(a.substring(5)) }
+                a == "next" -> search(1)
+                a == "colors" -> { pickingColor = true; sync() }
+            }
             return
         }
         intent.getStringExtra("type")?.let { t ->
@@ -332,6 +396,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         m.menu.add(0, 2, 1, "Новая схема…")
         m.menu.add(0, 3, 2, "Вписать всё")
         m.menu.add(0, 4, 3, "Связи с вложенными").isCheckable = true
+        if (clipboard().hasPrimaryClip() && Native.editable(handle)) m.menu.add(0, 5, 4, "Вставить")
         m.menu.findItem(4).isChecked = nestedLinks()
         m.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -342,6 +407,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
                     REQ_NEW
                 )
                 3 -> call { Native.fit(handle) }
+                5 -> paste()
                 4 -> {
                     val on = !nestedLinks()
                     getPreferences(MODE_PRIVATE).edit().putBoolean("nested", on).apply()
@@ -390,6 +456,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
                 "held" -> surfaceView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                 "text" -> text = line.substringAfter('\t').replace('\u0001', '\n')
                 "sel" -> selBox = p.drop(1).map { it.toFloat() }
+                "style" -> style = p.drop(1).map { it.toInt() }
                 "menu" -> menu = p.drop(1)
             }
         }
@@ -408,8 +475,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             field.clearFocus()
         }
         val sel = selBox
+        if (sel == null || editing) pickingColor = false
         when {
             menu != null -> showEdgeBar(menu)
+            sel != null && !editing && pickingColor -> showColorBar(sel)
             sel != null && !editing -> showSelBar(sel)
             else -> hideBar()
         }
@@ -463,10 +532,136 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         if (barKind != "sel") {
             bar.removeAllViews()
             bar.addView(barButton("Текст", false) { Native.editSelected(handle) }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(barButton("Удалить", false) { Native.deleteSelection(handle) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Цвет", false) { pickingColor = true }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(plainButton("Форма") { shapeMenu(it) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(plainButton("Ещё") { moreMenu(it) }, LinearLayout.LayoutParams(-2, -1))
             barKind = "sel"
         }
         placeBar((s[0] + s[2]) / 2, s[1], s[3])
+    }
+
+    /** The fill colours as dots; a tap paints the selection. */
+    private fun showColorBar(s: List<Float>) {
+        val kind = "colors${style[0]}"
+        if (barKind != kind) {
+            bar.removeAllViews()
+            for (k in PALETTE.indices) {
+                val on = style[0] == k
+                val dot = TextView(this).apply {
+                    gravity = Gravity.CENTER
+                    text = if (k == 0) "∅" else ""
+                    textSize = 14f
+                    setTextColor(Color.rgb(120, 120, 120))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(PALETTE[k])
+                        setStroke(dp(if (on) 2.5f else 1f).toInt(), if (on) Color.rgb(0x2f, 0x5f, 0xe0) else Color.argb(50, 0, 0, 0))
+                    }
+                    isSoundEffectsEnabled = false
+                    setOnClickListener {
+                        pickingColor = false
+                        call { Native.nodeChoice(handle, NODE_COLOR + k) }
+                    }
+                }
+                bar.addView(dot, LinearLayout.LayoutParams(dp(30f).toInt(), dp(30f).toInt()).apply { setMargins(dp(4f).toInt(), 0, dp(4f).toInt(), 0) })
+            }
+            barKind = kind
+        }
+        placeBar((s[0] + s[2]) / 2, s[1], s[3])
+    }
+
+    private fun shapeMenu(anchor: View) {
+        val m = PopupMenu(this, anchor)
+        val names = listOf("Прямоугольник", "Овал", "Ромб", "Текст без рамки")
+        for (k in names.indices) {
+            if (k == 3 && style[2] == 1) continue
+            m.menu.add(0, NODE_SHAPE + k, k, names[k]).isCheckable = true
+            m.menu.findItem(NODE_SHAPE + k).isChecked = style[1] == k
+        }
+        m.setOnMenuItemClickListener { call { Native.nodeChoice(handle, it.itemId) }; true }
+        m.show()
+    }
+
+    private fun moreMenu(anchor: View) {
+        val m = PopupMenu(this, anchor)
+        m.menu.add(0, NODE_DUPLICATE, 0, "Дублировать")
+        m.menu.add(0, 1, 1, "Копировать")
+        m.menu.add(0, NODE_WRAP, 2, "Обернуть в блок")
+        m.menu.add(0, NODE_DELETE, 3, "Удалить")
+        if (style[2] == 1) m.menu.add(0, NODE_DELETE_DEEP, 4, "Удалить с содержимым")
+        m.setOnMenuItemClickListener {
+            if (it.itemId == 1) copySelection() else call { Native.nodeChoice(handle, it.itemId) }
+            true
+        }
+        m.show()
+    }
+
+    private fun clipboard() = getSystemService(ClipboardManager::class.java)
+
+    /** Our last copy (text, board): clipboard managers and the emulator's
+     *  host sync may keep only the first, plain-text item. */
+    private var lastCopy: Pair<String, String>? = null
+
+    /** Plain text for other apps, the concepts themselves as a second item. */
+    private fun copySelection() {
+        if (handle == 0L) return
+        val board = Native.copySelection(handle) ?: return
+        val text = Native.selectionText(handle) ?: ""
+        val clip = ClipData.newPlainText(CLIP_LABEL, text)
+        clip.addItem(ClipData.Item(board))
+        lastCopy = text to board
+        clipboard().setPrimaryClip(clip)
+    }
+
+    private fun paste() {
+        val clip = clipboard().primaryClip ?: return
+        val ours = clip.description.label?.toString() == CLIP_LABEL && clip.itemCount > 1
+        val text = clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
+        val board = when {
+            ours -> clip.getItemAt(1).text?.toString() ?: ""
+            lastCopy?.first == text -> lastCopy!!.second
+            else -> ""
+        }
+        call { Native.paste(handle, board, text) }
+    }
+
+    private fun openSearch() {
+        if (handle == 0L) return
+        searchBox.visibility = View.VISIBLE
+        searchField.requestFocus()
+        getSystemService(InputMethodManager::class.java).showSoftInput(searchField, 0)
+        search(0)
+    }
+
+    private fun closeSearch() {
+        searchBox.visibility = View.GONE
+        getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(searchField.windowToken, 0)
+        searchField.clearFocus()
+        call { Native.searchClose(handle) }
+    }
+
+    /** step: 0 the query changed, 1 next, -1 previous. */
+    private fun search(step: Int) {
+        if (handle == 0L || searchBox.visibility != View.VISIBLE) return
+        val q = searchField.text.toString()
+        var r = listOf("0", "0")
+        call { r = Native.search(handle, q, step).split('\t') }
+        val n = r[1].toInt()
+        searchCount.text = when {
+            q.isBlank() -> ""
+            n == 0 -> "нет"
+            else -> "${r[0].toInt() + 1} из $n"
+        }
+    }
+
+    private fun plainButton(text: String, f: (View) -> Unit) = TextView(this).apply {
+        this.text = text
+        textSize = 15f
+        setTextColor(ink)
+        gravity = Gravity.CENTER
+        isSoundEffectsEnabled = false
+        setPadding(dp(12f).toInt(), 0, dp(12f).toInt(), 0)
+        setOnClickListener { f(it) }
     }
 
     private fun showEdgeBar(m: List<String>) {
@@ -593,6 +788,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     companion object {
         const val REQ_OPEN = 1
         const val REQ_NEW = 2
+        const val CLIP_LABEL = "Hyperschema.Board"
+        // Choices of core/src/editor.rs (NODE_*), fills of its PALETTE.
+        const val NODE_COLOR = 10
+        const val NODE_SHAPE = 20
+        const val NODE_DUPLICATE = 31
+        const val NODE_WRAP = 32
+        const val NODE_DELETE = 33
+        const val NODE_DELETE_DEEP = 34
+        val PALETTE = intArrayOf(
+            Color.WHITE, Color.parseColor("#e9ecef"), Color.parseColor("#ffc9c9"), Color.parseColor("#ffd8a8"),
+            Color.parseColor("#fff3bf"), Color.parseColor("#b2f2bb"), Color.parseColor("#a5d8ff"), Color.parseColor("#d0bfff")
+        )
         const val EMPTY = "{\"hyperschema\":1,\"nodes\":[],\"edges\":[],\"dimensions\":[{\"id\":\"main\",\"name\":\"Основной\",\"nest\":\"contains\"}]}"
     }
 }

@@ -9,8 +9,8 @@
 //! the selection or a connection, whether to save.
 #![cfg(target_os = "android")]
 
-use hs_core::board::{Board, Kind};
-use hs_core::editor::{Editor, Mode, Pos, Request};
+use hs_core::board::{Board, Kind, Shape as NShape};
+use hs_core::editor::{Editor, Mode, Pos, Request, PALETTE};
 use hs_core::scene::Scene;
 use hs_core::touch::Touch;
 use hs_core::{wgpu, Engine};
@@ -79,6 +79,77 @@ impl App {
             self.menu = Some((edge, x, y));
         }
     }
+
+    /// Paste and the like land in the middle of the screen.
+    fn aim_center(&mut self) {
+        let (w, hh) = self.ed.engine.size();
+        self.ed.cursor = Pos { x: w as f64 * 0.5, y: hh as f64 * 0.45 };
+    }
+}
+
+/// The selection bar's choices: `NODE_*` in `hs_core::editor` (colour,
+/// shape, duplicate, wrap, delete).
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_nodeChoice(_env: JNIEnv, _c: JClass, h: jlong, choice: jint) {
+    let a = app(h);
+    if a.editable {
+        a.ed.apply_node_choice(choice);
+        a.settle();
+    }
+}
+
+/// The selected concepts as a board (JSON) for the clipboard, or null.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_copySelection(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
+    let s = app(h).ed.copy_selection().map(|b| b.serialize());
+    out(&mut env, s)
+}
+
+/// Plain text of the selected concepts, for other apps.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_selectionText(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
+    let s = app(h).ed.selection_text();
+    out(&mut env, s)
+}
+
+/// Pastes copied concepts (board JSON) or, failing that, plain text as a
+/// new concept, in the middle of the screen.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_paste(mut env: JNIEnv, _c: JClass, h: jlong, board: JString, text: JString) {
+    let (board, text) = (jstr(&mut env, &board), jstr(&mut env, &text));
+    let a = app(h);
+    if !a.editable {
+        return;
+    }
+    a.aim_center();
+    match Board::parse(&board) {
+        Ok(b) if !board.is_empty() => a.ed.paste_board(b),
+        _ if !text.trim().is_empty() => a.ed.paste_concept(text.trim()),
+        _ => {}
+    }
+    a.settle();
+}
+
+/// Search: sets the query (or steps with `step` = 1 next, -1 previous) and
+/// returns `<current>\t<count>`; the camera flies to the match.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_search(mut env: JNIEnv, _c: JClass, h: jlong, query: JString, step: jint) -> jstring {
+    let q = jstr(&mut env, &query);
+    let a = app(h);
+    a.ed.search_open();
+    match step {
+        0 => a.ed.search_set(&q),
+        s => a.ed.search_step(s < 0),
+    }
+    a.menu = None;
+    a.settle();
+    let sr = a.ed.search.as_ref().unwrap();
+    out(&mut env, Some(format!("{}\t{}", sr.at, sr.hits.len())))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_searchClose(_env: JNIEnv, _c: JClass, h: jlong) {
+    app(h).ed.search_close();
 }
 
 #[no_mangle]
@@ -221,6 +292,14 @@ pub extern "system" fn Java_com_hyperschema_app_Native_poll(mut env: JNIEnv, _c:
             let sx = |x: f32| (x as f64 - e.cam.cx) * s + w as f64 * 0.5;
             let sy = |y: f32| (y as f64 - e.cam.cy) * s + hh as f64 * 0.5;
             lines.push(format!("sel\t{:.0}\t{:.0}\t{:.0}\t{:.0}", sx(b[0]), sy(b[1]), sx(b[2]), sy(b[3])));
+            // The first selected concept's fill and shape, and whether any
+            // holds others (no bare-text shape for those).
+            if let Some(n) = a.ed.sel.first().and_then(|id| a.ed.board.get(id)) {
+                let fill = PALETTE.iter().position(|p| p.1 == n.fill.as_deref()).map_or(-1, |k| k as i32);
+                let shape = [NShape::Box, NShape::Ellipse, NShape::Diamond, NShape::Text].iter().position(|s| *s == n.shape).unwrap_or(0);
+                let parent = a.ed.sel.iter().any(|id| a.ed.board.has_children(id));
+                lines.push(format!("style\t{fill}\t{shape}\t{}\t{}", parent as u8, a.ed.sel.len()));
+            }
         }
     }
     out(&mut env, Some(lines.join("\n")))

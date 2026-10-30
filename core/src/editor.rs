@@ -557,7 +557,7 @@ impl Editor {
 
     /// True while the overlay changes by itself (caret blink).
     pub fn animating(&self) -> bool {
-        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some() || self.search.is_some()
+        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some()
     }
 
     // ------------------------------------------------------------ search
