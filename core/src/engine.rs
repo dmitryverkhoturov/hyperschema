@@ -584,14 +584,10 @@ impl Engine {
         (w * size, n as f32 * LINE_H * size)
     }
 
-    /// Where a caret after the last character of `label` goes (top of the line).
-    pub fn caret(&self, label: &Label) -> (f32, f32) {
-        let mut l = label.clone();
-        l.text.push('|');
-        match self.text.make_layout(&l).glyphs.last() {
-            Some(&(_, gx, line)) => (l.x + gx * l.size, l.y + line as f32 * LINE_H * l.size),
-            None => (l.x, l.y),
-        }
+    /// Where a caret before each character of `label` goes, and after the
+    /// last one: world x, top of the line, line number.
+    pub fn caret_slots(&self, label: &Label) -> Vec<(f32, f32, u16)> {
+        self.text.layout_slots(label).1.into_iter().map(|(gx, line)| (label.x + gx * label.size, label.y + line as f32 * LINE_H * label.size, line)).collect()
     }
 
     /// Lines `text` takes when word-wrapped to `width` at font `size`. Only

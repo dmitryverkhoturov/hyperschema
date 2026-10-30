@@ -115,42 +115,64 @@ impl Text {
     }
 
     pub fn make_layout(&self, label: &Label) -> Layout {
+        self.layout_slots(label).0
+    }
+
+    /// The layout plus a caret slot for every character position
+    /// (`chars().count() + 1` of them): x in em from the label's left and
+    /// the line. A newline's slot is the end of its line.
+    pub fn layout_slots(&self, label: &Label) -> (Layout, Vec<(f32, u16)>) {
         let s = self.font.as_scaled(PxScale::from(1.0));
         let wrap_em = if label.wrap && label.w > 0.0 { label.w / label.size } else { f32::MAX };
         let box_em = label.w / label.size;
         let mut glyphs = Vec::with_capacity(label.text.len());
+        let mut slots = Vec::with_capacity(label.text.len() + 1);
         let mut line: u16 = 0;
         for para in label.text.split('\n') {
-            // Greedy word wrap.
-            let mut row: Vec<(GlyphId, f32)> = Vec::new();
+            // Greedy word wrap. `None`: the slot at the end of the paragraph.
+            let mut row: Vec<(Option<GlyphId>, f32)> = Vec::new();
             let mut x = 0f32;
-            let flush = |row: &mut Vec<(GlyphId, f32)>, width: f32, line: u16, glyphs: &mut Vec<(GlyphId, f32, u16)>| {
+            let flush = |row: &mut Vec<(Option<GlyphId>, f32)>, width: f32, line: u16, glyphs: &mut Vec<(GlyphId, f32, u16)>, slots: &mut Vec<(f32, u16)>| {
                 let off = match label.align {
                     Align::Left => 0.0,
                     Align::Center => (box_em - width) * 0.5,
                     Align::Right => box_em - width,
                 };
-                glyphs.extend(row.drain(..).map(|(g, gx)| (g, gx + off, line)));
+                for (g, gx) in row.drain(..) {
+                    slots.push((gx + off, line));
+                    if let Some(g) = g {
+                        glyphs.push((g, gx + off, line));
+                    }
+                }
             };
             for word in para.split_inclusive(' ') {
                 let ids: Vec<GlyphId> = word.chars().map(|c| self.font.glyph_id(c)).collect();
                 let w: f32 = ids.iter().map(|&g| s.h_advance(g)).sum();
                 let trailing = if word.ends_with(' ') { s.h_advance(self.font.glyph_id(' ')) } else { 0.0 };
                 if x > 0.0 && x + w - trailing > wrap_em {
-                    flush(&mut row, x, line, &mut glyphs);
+                    flush(&mut row, x, line, &mut glyphs, &mut slots);
                     line += 1;
                     x = 0.0;
                 }
+                // A word longer than the line (a link, a path) breaks anywhere.
+                let long = w - trailing > wrap_em;
                 for g in ids {
-                    row.push((g, x));
-                    x += s.h_advance(g);
+                    let adv = s.h_advance(g);
+                    if long && x > 0.0 && x + adv > wrap_em {
+                        flush(&mut row, x, line, &mut glyphs, &mut slots);
+                        line += 1;
+                        x = 0.0;
+                    }
+                    row.push((Some(g), x));
+                    x += adv;
                 }
             }
+            row.push((None, x));
             let width = x - if para.ends_with(' ') { s.h_advance(self.font.glyph_id(' ')) } else { 0.0 };
-            flush(&mut row, width, line, &mut glyphs);
+            flush(&mut row, width, line, &mut glyphs, &mut slots);
             line += 1;
         }
-        Layout { glyphs }
+        (Layout { glyphs }, slots)
     }
 
     pub fn bucket_for(px: f32) -> u8 {

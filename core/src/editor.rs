@@ -63,6 +63,18 @@ pub enum Mode {
     Text { target: TextTarget, text: String, created: bool },
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TextKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Backspace,
+    Delete,
+}
+
 pub enum Hit {
     Handle(String, Handle),
     Dot(String),
@@ -104,6 +116,11 @@ pub struct Editor {
     /// Finger input: bigger targets, handles only on the selection.
     pub touch: bool,
     pub caret_epoch: Instant,
+    /// Caret and selection anchor in the text being edited, in characters.
+    pub caret: usize,
+    pub anchor: usize,
+    /// The mouse is selecting text (pressed inside the text being edited).
+    text_drag: bool,
     pub undo_stack: Vec<Change>,
     pub redo_stack: Vec<Change>,
     pub step_base: Option<Snapshot>,
@@ -134,6 +151,9 @@ impl Editor {
             ui,
             touch,
             caret_epoch: Instant::now(),
+            caret: 0,
+            anchor: 0,
+            text_drag: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             step_base: None,
@@ -372,19 +392,25 @@ impl Editor {
         }
         match &self.mode {
             Mode::Text { target, text, .. } => {
-                if (self.caret_epoch.elapsed().as_millis() / 530) % 2 == 0 {
-                    let label = match target {
-                        TextTarget::Node(id) => board.get(id).and_then(|n| caret_label(&board, n, text, &m)),
-                        TextTarget::Edge(eid) => self.routes.get(eid).map(|p| {
-                            let font = board.edge(eid).map_or(20.0, |e| view::edge_font(&board, &e.from, &e.to)) * 0.8;
-                            let c = midpoint(p);
-                            let lines = m(text, font, font * 12.0).max(1) as f32;
-                            Label { x: c.0 - font * 6.0, y: c.1 - lines * LINE_H * font * 0.5, w: font * 12.0, size: font, color: 0, align: Align::Center, wrap: true, text: text.clone() }
-                        }),
-                    };
-                    if let Some(l) = label {
-                        let (x, y) = self.engine.caret(&l);
-                        ov.rects.push(Rect { x, y, w: (1.5 * px).max(l.size * 0.06), h: LINE_H * l.size, fill: blue(255), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
+                if let Some(l) = self.text_label(&board, target, text) {
+                    let slots = self.engine.caret_slots(&l);
+                    let lh = LINE_H * l.size;
+                    let (a, b) = (self.anchor.min(self.caret).min(slots.len() - 1), self.anchor.max(self.caret).min(slots.len() - 1));
+                    // Selection: one band per line it spans.
+                    let mut k = a;
+                    while k < b {
+                        let line = slots[k].2;
+                        let mut e = k;
+                        while e < b && slots[e + 1].2 == line {
+                            e += 1;
+                        }
+                        let (x0, x1) = (slots[k].0.min(slots[e].0), slots[k].0.max(slots[e].0));
+                        ov.rects.push(Rect { x: x0, y: slots[k].1, w: (x1 - x0).max(l.size * 0.25), h: lh, fill: blue(70), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
+                        k = e + 1;
+                    }
+                    if (self.caret_epoch.elapsed().as_millis() / 530) % 2 == 0 || self.text_drag {
+                        let (x, y, _) = slots[self.caret.min(slots.len() - 1)];
+                        ov.rects.push(Rect { x, y, w: (1.5 * px).max(l.size * 0.06), h: lh, fill: blue(255), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
                     }
                 }
             }
@@ -434,6 +460,20 @@ impl Editor {
             _ => {}
         }
         self.engine.set_overlay(&ov);
+    }
+
+    /// The label showing `text` for a text target, laid out as drawn.
+    fn text_label(&self, board: &Board, target: &TextTarget, text: &str) -> Option<Label> {
+        let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
+        match target {
+            TextTarget::Node(id) => board.get(id).and_then(|n| caret_label(board, n, text, &m)),
+            TextTarget::Edge(eid) => self.routes.get(eid).map(|p| {
+                let font = board.edge(eid).map_or(20.0, |e| view::edge_font(board, &e.from, &e.to)) * 0.8;
+                let c = midpoint(p);
+                let lines = m(text, font, font * 12.0).max(1) as f32;
+                Label { x: c.0 - font * 6.0, y: c.1 - lines * LINE_H * font * 0.5, w: font * 12.0, size: font, color: 0, align: Align::Center, wrap: true, text: text.to_string() }
+            }),
+        }
     }
 
     fn live_route(&self, eid: &str) -> Option<Vec<Pt>> {
@@ -523,12 +563,35 @@ impl Editor {
     /// text it acts like a parent's empty inside (pan, double-click or long
     /// press creates a nested concept).
     fn roomy_spot(&self, n: &Node, p: Pt) -> bool {
-        if n.shape == NShape::Text || n.w.min(n.h) < 200.0 * self.dp() {
-            return false;
-        }
-        let lines = if n.text.is_empty() { 0 } else { self.lines(&n.text, n.font, (n.w - 2.0 * n.pad()).max(n.font)) };
-        let band = lines as f32 * LINE_H * n.font * 0.5 + n.font;
-        (p.1 - (n.y + n.h * 0.5)).abs() > band
+        n.shape != NShape::Text && n.w.min(n.h) >= 200.0 * self.dp() && !self.on_text(n, p)
+    }
+
+    /// Whether a double click at the pointer on leaf `id` nests a new
+    /// concept in it rather than editing its text: off the text, and the
+    /// leaf is big enough on screen to aim at a spot in it.
+    fn nest_spot(&self, id: &str) -> bool {
+        let board = self.shown();
+        let Some(n) = board.get(id) else { return false };
+        n.shape != NShape::Text && !board.has_children(id) && n.w.min(n.h) >= 48.0 * self.dp() && !self.on_text(n, self.world())
+    }
+
+    /// Whether `p` is on the text of leaf `n`: the box the text covers plus
+    /// a margin (an empty leaf: a short line at its centre).
+    fn on_text(&self, n: &Node, p: Pt) -> bool {
+        let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
+        let Some(l) = caret_label(self.shown(), n, &n.text, &m) else { return false };
+        let lh = LINE_H * l.size;
+        let pad = (0.35 * l.size).max(6.0 * self.dp());
+        let zone = if n.text.trim().is_empty() {
+            let (cx, cy) = (n.x + n.w * 0.5, n.y + n.h * 0.5);
+            [cx - 2.0 * l.size, cy - lh * 0.5, cx + 2.0 * l.size, cy + lh * 0.5]
+        } else {
+            let slots = self.engine.caret_slots(&l);
+            let (x0, x1) = slots.iter().fold((f32::MAX, f32::MIN), |(a, b), s| (a.min(s.0), b.max(s.0)));
+            let lines = slots.iter().map(|s| s.2).max().unwrap_or(0) as f32 + 1.0;
+            [x0, l.y, x1, l.y + lines * lh]
+        };
+        inside(&zone, p, pad)
     }
 
     /// A concept a connection from `from` may attach to, under the pointer.
@@ -620,6 +683,24 @@ impl Editor {
 
     /// Left button / finger down. `double`: the second press of a double click.
     pub fn press(&mut self, alt: bool, shift: bool, double: bool) {
+        // On the text being edited a press moves the caret (a drag selects,
+        // a double click selects a word). Fingers edit through the native
+        // text field, which owns the caret there.
+        if !self.touch && !self.frozen {
+            if let Some(k) = self.slot_at_pointer(true) {
+                if double {
+                    self.select_word(k);
+                } else {
+                    self.caret = k;
+                    if !shift {
+                        self.anchor = k;
+                    }
+                    self.text_drag = true;
+                }
+                self.caret_epoch = Instant::now();
+                return;
+            }
+        }
         self.commit_text();
         // Hover is not tracked while typing: find what is under the pointer now.
         self.update_hover();
@@ -631,7 +712,19 @@ impl Editor {
         let at = self.cursor;
         if double {
             match hit {
-                Hit::Node(id) => self.start_text(TextTarget::Node(id), false),
+                // A leaf off its text: a concept nested in it, like a parent's inside.
+                Hit::Node(id) if self.nest_spot(&id) => {
+                    let p = self.world();
+                    self.create_at(p, Some(id));
+                }
+                Hit::Node(id) => {
+                    self.start_text(TextTarget::Node(id), false);
+                    if !self.touch {
+                        if let Some(k) = self.slot_at_pointer(false) {
+                            (self.caret, self.anchor) = (k, k);
+                        }
+                    }
+                }
                 Hit::Handle(id, _) if !id.is_empty() => self.start_text(TextTarget::Node(id), false),
                 Hit::Edge(e) | Hit::EdgeMid(e) | Hit::EdgeEnd(e, _) => self.start_text(TextTarget::Edge(e), false),
                 _ => self.mode = Mode::Press { at, node: None, double: true, edge_mid: None },
@@ -691,6 +784,12 @@ impl Editor {
 
     /// Pointer moved while a button is down. Returns true if it needs a redraw.
     pub fn drag_to(&mut self, prev: Pos) -> bool {
+        if self.text_drag {
+            if let Some(k) = self.slot_at_pointer(false) {
+                self.caret = k;
+            }
+            return true;
+        }
         let cur = self.cursor;
         match &mut self.mode {
             Mode::Pan { moved, at } => {
@@ -872,6 +971,28 @@ impl Editor {
                 node.h = nh;
                 node.font = n.font * (nw.min(nh) / ow.min(oh)).max(0.02);
             }
+            // The text must stay inside a leaf: narrowing it only sideways
+            // makes it taller, otherwise the text gets smaller.
+            if !base.has_children(&id) && n.shape != NShape::Text && !n.text.is_empty() {
+                let need = |f: f32| self.lines(&n.text, f, (nw - f).max(f)) as f32 * LINE_H * f + f;
+                let node = board.get_mut(&id).unwrap();
+                if need(node.font) > nh {
+                    if handle & (T | B) == 0 {
+                        node.h = need(node.font);
+                    } else {
+                        let (mut lo, mut hi) = (node.font * 0.05, node.font);
+                        for _ in 0..12 {
+                            let mid = (lo + hi) * 0.5;
+                            if need(mid) > nh {
+                                hi = mid;
+                            } else {
+                                lo = mid;
+                            }
+                        }
+                        node.font = lo;
+                    }
+                }
+            }
             if base.has_children(&id) {
                 let nn = board.node(&id).clone();
                 let lines = view::title_lines(&nn, &|t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w));
@@ -949,6 +1070,7 @@ impl Editor {
     }
 
     pub fn release(&mut self) {
+        self.text_drag = false;
         self.flush_drag();
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             Mode::Pan { moved: false, .. } => {
@@ -1047,6 +1169,7 @@ impl Editor {
         }
         self.sel = vec![id.clone()];
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
+        (self.caret, self.anchor) = (0, 0);
         self.caret_epoch = Instant::now();
     }
 
@@ -1077,7 +1200,9 @@ impl Editor {
         } else if let Some(pn) = parent.and_then(|q| self.board.get(q)).cloned() {
             let lines = self.title_lines(&pn);
             let area = self.board.content_area(&pn, lines);
-            let k = ((area[2] - area[0]) * 0.45 / w).min(1.0).max(0.05);
+            // Smaller than the parent, but readable on screen: the parent
+            // grows around it instead.
+            let k = ((area[2] - area[0]) * 0.45 / w).min(1.0).max(0.6).min(pn.font / font);
             w *= k;
             h *= k;
             font *= k;
@@ -1132,6 +1257,7 @@ impl Editor {
         self.sel = vec![id.clone()];
         self.sel_edge = None;
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
+        (self.caret, self.anchor) = (0, 0);
         self.caret_epoch = Instant::now();
     }
 
@@ -1153,7 +1279,149 @@ impl Editor {
         let Some(text) = text else { return };
         self.begin();
         self.caret_epoch = Instant::now();
+        self.caret = text.chars().count();
+        self.anchor = self.caret;
         self.mode = Mode::Text { target, text, created };
+    }
+
+    /// The caret slot nearest the pointer in the text being edited. With
+    /// `strict`, only while the pointer is on that concept or label.
+    fn slot_at_pointer(&self, strict: bool) -> Option<usize> {
+        let Mode::Text { target, text, .. } = &self.mode else { return None };
+        let board = self.shown();
+        let l = self.text_label(board, target, text)?;
+        let p = self.world();
+        let slots = self.engine.caret_slots(&l);
+        let lh = LINE_H * l.size;
+        let last = slots.iter().map(|s| s.2).max().unwrap_or(0);
+        if strict {
+            let on = match target {
+                TextTarget::Node(id) => board.get(id).is_some_and(|n| inside(&n.bbox(), p, self.tol())),
+                TextTarget::Edge(_) => {
+                    let (x0, x1) = slots.iter().fold((f32::MAX, f32::MIN), |(a, b), s| (a.min(s.0), b.max(s.0)));
+                    inside(&[x0, l.y, x1, l.y + (last + 1) as f32 * lh], p, self.tol() + l.size)
+                }
+            };
+            if !on {
+                return None;
+            }
+        }
+        let line = (((p.1 - l.y) / lh).floor().max(0.0) as u16).min(last);
+        (0..slots.len()).filter(|&k| slots[k].2 == line).min_by(|&a, &b| (slots[a].0 - p.0).abs().total_cmp(&(slots[b].0 - p.0).abs()))
+    }
+
+    /// Selects the word (or run of spaces or punctuation) around slot `k`.
+    fn select_word(&mut self, k: usize) {
+        let Mode::Text { text, .. } = &self.mode else { return };
+        let cs: Vec<char> = text.chars().collect();
+        let kind = |i: usize| cs.get(i).map(|&c| if c == '\n' { 2 } else if c.is_alphanumeric() || c == '_' { 1 } else { 0 });
+        let (mut a, mut b) = (k.min(cs.len()), k.min(cs.len()));
+        let pick = if kind(b) == Some(1) || a == 0 { kind(b) } else { kind(a - 1) };
+        if pick.is_none() || pick == Some(2) {
+            return;
+        }
+        while a > 0 && kind(a - 1) == pick {
+            a -= 1;
+        }
+        while b < cs.len() && kind(b) == pick {
+            b += 1;
+        }
+        self.anchor = a;
+        self.caret = b;
+    }
+
+    /// The selected part of the text being edited.
+    pub fn selected_text(&self) -> Option<String> {
+        let Mode::Text { text, .. } = &self.mode else { return None };
+        let (a, b) = (self.anchor.min(self.caret), self.anchor.max(self.caret));
+        (a < b).then(|| text.chars().skip(a).take(b - a).collect())
+    }
+
+    pub fn select_all(&mut self) {
+        let Mode::Text { text, .. } = &self.mode else { return };
+        self.anchor = 0;
+        self.caret = text.chars().count();
+        self.caret_epoch = Instant::now();
+    }
+
+    /// Caret movement and deletion keys while editing text.
+    pub fn text_key(&mut self, key: TextKey, shift: bool, ctrl: bool) {
+        let Mode::Text { target, text, .. } = &self.mode else { return };
+        let cs: Vec<char> = text.chars().collect();
+        let n = cs.len();
+        let (a, b) = (self.anchor.min(self.caret), self.anchor.max(self.caret));
+        let word_left = |mut k: usize| {
+            while k > 0 && !cs[k - 1].is_alphanumeric() {
+                k -= 1;
+            }
+            while k > 0 && cs[k - 1].is_alphanumeric() {
+                k -= 1;
+            }
+            k
+        };
+        let word_right = |mut k: usize| {
+            while k < n && !cs[k].is_alphanumeric() {
+                k += 1;
+            }
+            while k < n && cs[k].is_alphanumeric() {
+                k += 1;
+            }
+            k
+        };
+        let slots = self.text_label(self.shown(), target, text).map(|l| self.engine.caret_slots(&l)).unwrap_or_default();
+        let c = self.caret.min(n);
+        let line_of = |k: usize| slots.get(k).map_or(0, |s| s.2);
+        let to_line = |line: i32| -> usize {
+            let x = slots.get(c).map_or(0.0, |s| s.0);
+            (0..slots.len()).filter(|&k| slots[k].2 as i32 == line).min_by(|&p, &q| (slots[p].0 - x).abs().total_cmp(&(slots[q].0 - x).abs())).unwrap_or(if line < 0 { 0 } else { n })
+        };
+        let moved = match key {
+            TextKey::Left if !shift && !ctrl && a < b => Some(a),
+            TextKey::Right if !shift && !ctrl && a < b => Some(b),
+            TextKey::Left if ctrl => Some(word_left(c)),
+            TextKey::Right if ctrl => Some(word_right(c)),
+            TextKey::Left => Some(c.saturating_sub(1)),
+            TextKey::Right => Some((c + 1).min(n)),
+            TextKey::Up => Some(to_line(line_of(c) as i32 - 1)),
+            TextKey::Down => Some(to_line(line_of(c) as i32 + 1)),
+            TextKey::Home if ctrl => Some(0),
+            TextKey::End if ctrl => Some(n),
+            TextKey::Home => Some((0..=c).rev().take_while(|&i| line_of(i) == line_of(c)).last().unwrap_or(0)),
+            TextKey::End => Some((c..slots.len()).take_while(|&i| line_of(i) == line_of(c)).last().unwrap_or(n)),
+            TextKey::Backspace | TextKey::Delete => None,
+        };
+        if let Some(k) = moved {
+            self.caret = k.min(n);
+            if !shift {
+                self.anchor = self.caret;
+            }
+        } else {
+            let (from, to) = if a < b {
+                (a, b)
+            } else if key == TextKey::Backspace {
+                (if ctrl { word_left(c) } else { c.saturating_sub(1) }, c)
+            } else {
+                (c, if ctrl { word_right(c) } else { (c + 1).min(n) })
+            };
+            if from < to {
+                self.replace_range(from, to, "");
+            }
+        }
+        self.caret_epoch = Instant::now();
+    }
+
+    /// Replaces characters `from..to` of the text being edited with `s` and
+    /// puts the caret after it.
+    fn replace_range(&mut self, from: usize, to: usize, s: &str) {
+        let Mode::Text { target, text, .. } = &mut self.mode else { return };
+        let byte = |t: &str, k: usize| t.char_indices().nth(k).map_or(t.len(), |(i, _)| i);
+        let (bf, bt) = (byte(text, from), byte(text, to));
+        text.replace_range(bf..bt, s);
+        self.caret = from + s.chars().count();
+        self.anchor = self.caret;
+        let (target, text) = (target.clone(), text.clone());
+        self.apply_text(&target, &text);
+        self.rebuild();
     }
 
     /// Enter / F2: edit the text of the selected concept or connection.
@@ -1174,27 +1442,44 @@ impl Editor {
     pub fn set_text(&mut self, s: &str) {
         let Mode::Text { target, text, .. } = &mut self.mode else { return };
         *text = s.to_string();
+        self.caret = s.chars().count();
+        self.anchor = self.caret;
         let (target, text) = (target.clone(), text.clone());
         self.apply_text(&target, &text);
         self.rebuild();
     }
 
+    /// Typed or pasted text: replaces the selection at the caret.
+    /// Backspace arrives as U+0008.
     pub fn type_text(&mut self, s: &str) {
-        let Mode::Text { target, text, .. } = &mut self.mode else { return };
+        if !self.editing_text() {
+            return;
+        }
+        let mut buf = String::new();
         for c in s.chars() {
             match c {
                 '\u{8}' => {
-                    text.pop();
+                    if !buf.is_empty() {
+                        self.insert(&std::mem::take(&mut buf));
+                    }
+                    self.text_key(TextKey::Backspace, false, false);
                 }
-                '\r' | '\n' => text.push('\n'),
-                c if !c.is_control() => text.push(c),
+                '\r' => {}
+                '\n' => buf.push('\n'),
+                '\t' => buf.push(' '),
+                c if !c.is_control() => buf.push(c),
                 _ => {}
             }
         }
-        let (target, text) = (target.clone(), text.clone());
-        self.apply_text(&target, &text);
+        if !buf.is_empty() {
+            self.insert(&buf);
+        }
         self.caret_epoch = Instant::now();
-        self.rebuild();
+    }
+
+    fn insert(&mut self, s: &str) {
+        let (a, b) = (self.anchor.min(self.caret), self.anchor.max(self.caret));
+        self.replace_range(a, b, s);
     }
 
     fn apply_text(&mut self, target: &TextTarget, text: &str) {
@@ -1276,6 +1561,34 @@ impl Editor {
         self.board.delete(&sel, deep);
         self.commit();
         self.rebuild();
+    }
+
+    /// Ctrl+A on the canvas.
+    pub fn select_all_nodes(&mut self) {
+        self.sel = self.board.nodes.iter().map(|n| n.id.clone()).collect();
+        self.sel_edge = None;
+    }
+
+    /// Ctrl+C on the canvas: the text of the selected concepts, one per line.
+    pub fn selection_text(&self) -> Option<String> {
+        if let Some(e) = self.sel_edge.as_ref().and_then(|e| self.board.edge(e)) {
+            return (!e.label.is_empty()).then(|| e.label.clone());
+        }
+        let t: Vec<&str> = self.board.nodes.iter().filter(|n| self.sel.contains(&n.id) && !n.text.is_empty()).map(|n| n.text.as_str()).collect();
+        (!t.is_empty()).then(|| t.join("\n"))
+    }
+
+    /// Ctrl+V on the canvas: a new concept with `text` under the pointer
+    /// (the middle of the view when the pointer is outside the window).
+    pub fn paste_concept(&mut self, text: &str) {
+        let (w, h) = self.engine.size();
+        if self.cursor.x < 0.0 || self.cursor.y < 0.0 || self.cursor.x > w as f64 || self.cursor.y > h as f64 {
+            self.cursor = Pos { x: w as f64 / 2.0, y: h as f64 / 2.0 };
+        }
+        let p = self.world();
+        self.create_at(p, None);
+        self.type_text(text);
+        self.commit_text();
     }
 
     /// Ctrl+G: a new concept around the selection, holding it.

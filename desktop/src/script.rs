@@ -6,6 +6,7 @@
 //! move X Y | down [alt] [shift] | up | rdown | click X Y | dbl X Y
 //! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
 //! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group
+//! key left|right|up|down|home|end|del|selall|copy|cut|paste [shift] [ctrl]
 //! choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
 //! timeline open|seek N|restore|close | shot out.png | state | tree | quit
 //! (# starts a comment)
@@ -117,6 +118,38 @@ impl State {
                 "redo" => self.undo(true),
                 "save" => self.flush(),
                 "group" => self.wrap_selection(),
+                k @ ("left" | "right" | "up" | "down" | "home" | "end" | "del") => {
+                    use hs_core::editor::TextKey;
+                    let tk = match k {
+                        "left" => TextKey::Left,
+                        "right" => TextKey::Right,
+                        "up" => TextKey::Up,
+                        "down" => TextKey::Down,
+                        "home" => TextKey::Home,
+                        "end" => TextKey::End,
+                        _ => TextKey::Delete,
+                    };
+                    self.ed.text_key(tk, has("shift"), has("ctrl"));
+                }
+                "selall" => self.ed.select_all(),
+                "copy" | "cut" => {
+                    if let Some(t) = self.ed.selected_text().or_else(|| self.ed.selection_text()) {
+                        crate::clip::set(&t);
+                        if w[1] == "cut" {
+                            self.ed.text_key(hs_core::editor::TextKey::Delete, false, false);
+                        }
+                    }
+                }
+                "paste" => {
+                    if let Some(t) = crate::clip::get() {
+                        if self.editing_text() {
+                            self.type_text(&t);
+                        } else {
+                            self.ed.paste_concept(t.trim());
+                            self.settle();
+                        }
+                    }
+                }
                 other => note = format!("unknown key {other}"),
             },
             "choose" => self.script_choice = Some(n(1) as i32),
@@ -192,8 +225,12 @@ cam {:.1} {:.1} {:.4} size {:?}
     fn describe(&self) -> String {
         let sel: Vec<String> = self.ed.sel.iter().map(|id| self.label_of(id)).collect();
         let edge = self.ed.sel_edge.as_ref().and_then(|e| self.ed.board.edge(e)).map(|e| format!(" edge {}--{}", self.label_of(&e.from), self.label_of(&e.to))).unwrap_or_default();
+        let text = match &self.ed.mode {
+            hs_core::editor::Mode::Text { text, .. } => format!(" text {:?} caret {} anchor {}", text, self.ed.caret, self.ed.anchor),
+            _ => String::new(),
+        };
         format!(
-            "nodes {} links {} sel [{}]{edge} editing {} undo {} unsaved {}",
+            "nodes {} links {} sel [{}]{edge} editing {}{text} undo {} unsaved {}",
             self.ed.board.nodes.len(),
             self.ed.board.edges.iter().filter(|e| e.kind == hs_core::board::Kind::Link).count(),
             sel.join(", "),

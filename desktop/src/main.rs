@@ -9,6 +9,7 @@
 #![windows_subsystem = "windows"]
 
 mod chrome;
+mod clip;
 mod dm;
 mod edit;
 mod script;
@@ -571,11 +572,34 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if st.editing_text() {
+                    use hs_core::editor::TextKey;
+                    let tk = |st: &mut State, k: TextKey| st.ed.text_key(k, shift, ctrl);
                     match key {
                         Key::Named(NamedKey::Escape) => st.commit_text(),
                         Key::Named(NamedKey::Enter) if ctrl => st.commit_text(),
-                        Key::Named(NamedKey::Backspace) => st.type_text("\u{8}"),
+                        Key::Named(NamedKey::Backspace) => tk(st, TextKey::Backspace),
+                        Key::Named(NamedKey::Delete) => tk(st, TextKey::Delete),
+                        Key::Named(NamedKey::ArrowLeft) => tk(st, TextKey::Left),
+                        Key::Named(NamedKey::ArrowRight) => tk(st, TextKey::Right),
+                        Key::Named(NamedKey::ArrowUp) => tk(st, TextKey::Up),
+                        Key::Named(NamedKey::ArrowDown) => tk(st, TextKey::Down),
+                        Key::Named(NamedKey::Home) => tk(st, TextKey::Home),
+                        Key::Named(NamedKey::End) => tk(st, TextKey::End),
                         Key::Named(NamedKey::Enter) => st.type_text("\n"),
+                        _ if ctrl && letter == Some(KeyCode::KeyA) => st.ed.select_all(),
+                        _ if ctrl && matches!(letter, Some(KeyCode::KeyC) | Some(KeyCode::KeyX)) => {
+                            if let Some(t) = st.ed.selected_text() {
+                                clip::set(&t);
+                                if letter == Some(KeyCode::KeyX) {
+                                    tk(st, TextKey::Delete);
+                                }
+                            }
+                        }
+                        _ if ctrl && letter == Some(KeyCode::KeyV) => {
+                            if let Some(t) = clip::get() {
+                                st.type_text(&t);
+                            }
+                        }
                         _ => {
                             if let Some(t) = &event.text {
                                 if !ctrl {
@@ -610,6 +634,18 @@ impl ApplicationHandler for App {
                         Some(KeyCode::KeyO) => st.open_dialog(),
                         Some(KeyCode::KeyN) => st.new_board(),
                         Some(KeyCode::KeyH) => st.open_timeline(),
+                        Some(KeyCode::KeyA) => st.ed.select_all_nodes(),
+                        Some(KeyCode::KeyC) => {
+                            if let Some(t) = st.ed.selection_text() {
+                                clip::set(&t);
+                            }
+                        }
+                        Some(KeyCode::KeyV) => {
+                            if let Some(t) = clip::get().filter(|t| !t.trim().is_empty()) {
+                                st.ed.paste_concept(t.trim());
+                                st.settle();
+                            }
+                        }
                         _ => {}
                     }
                 }
