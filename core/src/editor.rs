@@ -27,7 +27,35 @@ pub enum Request {
     /// The connection's middle handle was tapped: direction, label, delete
     /// (answer with `apply_edge_choice`).
     EdgeMenu { edge: String, x: f64, y: f64 },
+    /// Right click on a concept: colour, shape and commands for the
+    /// selection (answer with `apply_node_choice`, see `NODE_MENU_*`).
+    NodeMenu { x: f64, y: f64 },
+    /// Right click on empty canvas: a new concept or paste there.
+    CanvasMenu { x: f64, y: f64 },
 }
+
+/// Fill colours offered for concepts (none first): name, colour.
+pub const PALETTE: [(&str, Option<&str>); 8] = [
+    ("Без заливки", None),
+    ("Серый", Some("#e9ecef")),
+    ("Красный", Some("#ffc9c9")),
+    ("Оранжевый", Some("#ffd8a8")),
+    ("Жёлтый", Some("#fff3bf")),
+    ("Зелёный", Some("#b2f2bb")),
+    ("Голубой", Some("#a5d8ff")),
+    ("Фиолетовый", Some("#d0bfff")),
+];
+
+/// Menu choices: `NODE_COLOR + k` picks `PALETTE[k]`, `NODE_SHAPE + k`
+/// picks box, ellipse, diamond, bare text.
+pub const NODE_COLOR: i32 = 10;
+pub const NODE_SHAPE: i32 = 20;
+pub const NODE_EDIT: i32 = 30;
+pub const NODE_DUPLICATE: i32 = 31;
+pub const NODE_WRAP: i32 = 32;
+pub const NODE_DELETE: i32 = 33;
+pub const NODE_DELETE_DEEP: i32 = 34;
+pub const CANVAS_NEW: i32 = 40;
 
 const BLUE: (u8, u8, u8) = (0x4a, 0x7d, 0xff);
 
@@ -73,6 +101,22 @@ pub enum TextKey {
     End,
     Backspace,
     Delete,
+}
+
+/// Ctrl+F: the query, what matches it and which match is shown.
+#[derive(Default)]
+pub struct Search {
+    pub query: String,
+    pub hits: Vec<TextTarget>,
+    pub at: usize,
+}
+
+/// A camera flight: from, to, start, length.
+struct Flight {
+    from: (f64, f64, f64),
+    to: (f64, f64, f64),
+    start: Instant,
+    ms: f64,
 }
 
 pub enum Hit {
@@ -121,6 +165,15 @@ pub struct Editor {
     pub anchor: usize,
     /// The mouse is selecting text (pressed inside the text being edited).
     text_drag: bool,
+    /// Size of the concept when its text editing began: typing grows it,
+    /// erasing shrinks it back, never below this.
+    text_box: Option<(f32, f32)>,
+    /// Where the last context menu was asked for, in the world.
+    menu_at: Pt,
+    /// The button down is the right one (its click opens a menu).
+    right_press: bool,
+    pub search: Option<Search>,
+    flight: Option<Flight>,
     pub undo_stack: Vec<Change>,
     pub redo_stack: Vec<Change>,
     pub step_base: Option<Snapshot>,
@@ -154,6 +207,11 @@ impl Editor {
             caret: 0,
             anchor: 0,
             text_drag: false,
+            text_box: None,
+            menu_at: (0.0, 0.0),
+            right_press: false,
+            search: None,
+            flight: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             step_base: None,
@@ -323,6 +381,7 @@ impl Editor {
     /// per frame, so it also applies a pending drag.
     pub fn refresh_overlay(&mut self) {
         self.flush_drag();
+        self.fly();
         let mut ov = Scene::default();
         let px = self.px();
         let board = self.shown().clone();
@@ -349,6 +408,16 @@ impl Editor {
             ov.rects.push(Rect { x: p.0 - r, y: p.1 - r, w: 2.0 * r, h: 2.0 * r, fill, stroke: blue(255), stroke_w: 1.5 * px, radius: 0.0, shape: Shape::Ellipse });
         };
         let dp = self.dp();
+        if let Some(sr) = &self.search {
+            for (k, h) in sr.hits.iter().enumerate() {
+                if let TextTarget::Node(id) = h {
+                    if let Some(n) = board.get(id) {
+                        let (a, w) = if k == sr.at { (255, 3.0) } else { (170, 2.0) };
+                        outline(&mut ov, n.bbox(), 7.0 * dp, rgba(0xff, 0xb0, 0x00, a), w * dp);
+                    }
+                }
+            }
+        }
         for id in &self.sel {
             if let Some(n) = board.get(id) {
                 outline(&mut ov, n.bbox(), 4.0 * dp, blue(255), 1.5 * dp);
@@ -488,7 +557,109 @@ impl Editor {
 
     /// True while the overlay changes by itself (caret blink).
     pub fn animating(&self) -> bool {
-        matches!(self.mode, Mode::Text { .. })
+        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some() || self.search.is_some()
+    }
+
+    // ------------------------------------------------------------ search
+
+    /// Ctrl+F: opens the search (empty query).
+    pub fn search_open(&mut self) {
+        self.commit_text();
+        if self.search.is_none() {
+            self.search = Some(Search::default());
+        }
+    }
+
+    pub fn search_close(&mut self) {
+        self.search = None;
+    }
+
+    /// New query: matches in concept text and connection labels, ignoring
+    /// case, in reading order (top to bottom, then left to right); flies to
+    /// the first.
+    pub fn search_set(&mut self, q: &str) {
+        let Some(sr) = &mut self.search else { return };
+        sr.query = q.to_string();
+        let ql = q.trim().to_lowercase();
+        let mut hits: Vec<(f32, f32, TextTarget)> = Vec::new();
+        if !ql.is_empty() {
+            for n in &self.board.nodes {
+                if n.text.to_lowercase().contains(&ql) {
+                    hits.push((n.y, n.x, TextTarget::Node(n.id.clone())));
+                }
+            }
+            for e in &self.board.edges {
+                if e.kind == Kind::Link && e.label.to_lowercase().contains(&ql) {
+                    if let Some(p) = self.routes.get(&e.id) {
+                        let c = midpoint(p);
+                        hits.push((c.1, c.0, TextTarget::Edge(e.id.clone())));
+                    }
+                }
+            }
+        }
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        sr.hits = hits.into_iter().map(|h| h.2).collect();
+        sr.at = 0;
+        self.search_show();
+    }
+
+    /// Enter / Shift+Enter: the next or previous match.
+    pub fn search_step(&mut self, back: bool) {
+        let Some(sr) = &mut self.search else { return };
+        let n = sr.hits.len();
+        if n == 0 {
+            return;
+        }
+        sr.at = if back { (sr.at + n - 1) % n } else { (sr.at + 1) % n };
+        self.search_show();
+    }
+
+    /// Selects the current match and flies the camera to it.
+    fn search_show(&mut self) {
+        let Some(hit) = self.search.as_ref().and_then(|sr| sr.hits.get(sr.at).cloned()) else { return };
+        let (b, font) = match &hit {
+            TextTarget::Node(id) => {
+                let Some(n) = self.board.get(id) else { return };
+                self.sel = vec![id.clone()];
+                self.sel_edge = None;
+                (n.bbox(), n.font)
+            }
+            TextTarget::Edge(eid) => {
+                let (Some(p), Some(e)) = (self.routes.get(eid), self.board.edge(eid)) else { return };
+                let c = midpoint(p);
+                let f = view::edge_font(&self.board, &e.from, &e.to);
+                self.sel.clear();
+                self.sel_edge = Some(eid.clone());
+                ([c.0 - f * 4.0, c.1 - f, c.0 + f * 4.0, c.1 + f], f)
+            }
+        };
+        // Keep the zoom if the text reads well, otherwise make it about
+        // 14 px; never so close that the match does not fit.
+        let (w, h) = self.engine.size();
+        let ui = self.ui as f64;
+        let cam = &self.engine.cam;
+        let fit = ((w as f64 / (b[2] - b[0]).max(1.0) as f64).min(h as f64 / (b[3] - b[1]).max(1.0) as f64)) * 0.8;
+        let s = cam.s.clamp(14.0 * ui / font as f64, 32.0 * ui / font as f64).min(fit);
+        let to = ((b[0] + b[2]) as f64 * 0.5, (b[1] + b[3]) as f64 * 0.5, s);
+        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: 450.0 });
+    }
+
+    /// Moves the camera along a flight; called once per frame.
+    fn fly(&mut self) {
+        let Some(f) = &self.flight else { return };
+        let t = (f.start.elapsed().as_secs_f64() * 1000.0 / f.ms).min(1.0);
+        let e = if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 };
+        // Scale moves geometrically; the centre so that the screen point
+        // of the target travels evenly.
+        let s = f.from.2 * (f.to.2 / f.from.2).powf(e);
+        let k = if (f.to.2 - f.from.2).abs() < 1e-9 { e } else { (1.0 / f.from.2 - 1.0 / s) / (1.0 / f.from.2 - 1.0 / f.to.2) };
+        let cam = &mut self.engine.cam;
+        cam.s = s;
+        cam.cx = f.from.0 + (f.to.0 - f.from.0) * k;
+        cam.cy = f.from.1 + (f.to.1 - f.from.1) * k;
+        if t >= 1.0 {
+            self.flight = None;
+        }
     }
 
     // ------------------------------------------------------------ hit testing
@@ -683,6 +854,7 @@ impl Editor {
 
     /// Left button / finger down. `double`: the second press of a double click.
     pub fn press(&mut self, alt: bool, shift: bool, double: bool) {
+        self.right_press = false;
         // On the text being edited a press moves the caret (a drag selects,
         // a double click selects a word). Fingers edit through the native
         // text field, which owns the caret there.
@@ -771,6 +943,7 @@ impl Editor {
 
     pub fn press_right(&mut self, shift: bool) {
         self.commit_text();
+        self.right_press = true;
         if self.frozen {
             return;
         }
@@ -1089,6 +1262,11 @@ impl Editor {
             }
             Mode::Move { roots, target, .. } => self.drop(roots, target),
             Mode::Resize { .. } => self.commit(),
+            // A right click without a drag opens the context menu.
+            Mode::Boxing { from, .. } if self.right_press && {
+                let w = self.engine.screen_to_world(self.cursor.x, self.cursor.y);
+                (w.0 - from.0).hypot(w.1 - from.1) * self.engine.cam.s < 4.0
+            } => self.context_menu(),
             Mode::Boxing { from, add } => {
                 let (x, y) = self.world();
                 let b = [(from.0 as f32).min(x), (from.1 as f32).min(y), (from.0 as f32).max(x), (from.1 as f32).max(y)];
@@ -1168,6 +1346,7 @@ impl Editor {
             self.board.add_edge(&from, &id, Kind::Link);
         }
         self.sel = vec![id.clone()];
+        self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
         self.caret_epoch = Instant::now();
@@ -1256,6 +1435,7 @@ impl Editor {
         let id = self.place_new(p, parent.as_deref());
         self.sel = vec![id.clone()];
         self.sel_edge = None;
+        self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
         self.caret_epoch = Instant::now();
@@ -1278,6 +1458,10 @@ impl Editor {
         };
         let Some(text) = text else { return };
         self.begin();
+        self.text_box = match &target {
+            TextTarget::Node(id) => self.board.get(id).map(|n| (n.w, n.h)),
+            TextTarget::Edge(_) => None,
+        };
         self.caret_epoch = Instant::now();
         self.caret = text.chars().count();
         self.anchor = self.caret;
@@ -1500,10 +1684,11 @@ impl Editor {
                     nn.w = w.max(n.font);
                     nn.h = h.max(n.font * LINE_H);
                 } else if !self.board.has_children(id) {
-                    let want_w = (tw.min(n.font * 14.0) + 2.0 * pad).max(n.w);
+                    let (bw, bh) = self.text_box.unwrap_or((n.w, n.h));
+                    let want_w = (tw.min(n.font * 14.0) + 2.0 * pad).max(bw);
                     let lines = self.lines(text, n.font, want_w - 2.0 * pad) as f32;
                     nn.w = want_w;
-                    nn.h = n.h.max(lines * LINE_H * n.font + 2.0 * pad);
+                    nn.h = bh.max(lines * LINE_H * n.font + 2.0 * pad);
                 }
                 *self.board.get_mut(id).unwrap() = nn.clone();
                 // A longer title pushes the content area down: keep children clear of it.
@@ -1533,6 +1718,7 @@ impl Editor {
     /// Ends text editing; a new concept left empty is removed again.
     pub fn commit_text(&mut self) {
         let Mode::Text { target, text, created } = std::mem::replace(&mut self.mode, Mode::Idle) else { return };
+        self.text_box = None;
         if let TextTarget::Node(id) = &target {
             if created && text.trim().is_empty() {
                 self.board.delete(&[id.clone()], false);
@@ -1563,6 +1749,131 @@ impl Editor {
         self.rebuild();
     }
 
+    /// Right click without a drag: a menu for what is under the pointer.
+    fn context_menu(&mut self) {
+        let (x, y) = (self.cursor.x, self.cursor.y);
+        self.menu_at = self.world();
+        match self.hit() {
+            Hit::Node(id) | Hit::Inside(id) | Hit::Handle(id, _) if !id.is_empty() => {
+                if !self.sel.contains(&id) {
+                    self.sel = vec![id];
+                }
+                self.sel_edge = None;
+                self.request = Some(Request::NodeMenu { x, y });
+            }
+            Hit::Handle(..) => self.request = Some(Request::NodeMenu { x, y }),
+            Hit::Edge(e) | Hit::EdgeMid(e) | Hit::EdgeEnd(e, _) => {
+                self.sel.clear();
+                self.sel_edge = Some(e.clone());
+                self.edge_menu(&e);
+            }
+            _ => self.request = Some(Request::CanvasMenu { x, y }),
+        }
+    }
+
+    /// The answer to a `NodeMenu` or `CanvasMenu` request (0: dismissed).
+    pub fn apply_node_choice(&mut self, choice: i32) {
+        let sel = self.sel.clone();
+        match choice {
+            c if (NODE_COLOR..NODE_COLOR + PALETTE.len() as i32).contains(&c) => {
+                let fill = PALETTE[(c - NODE_COLOR) as usize].1.map(String::from);
+                self.begin();
+                for id in &sel {
+                    if let Some(n) = self.board.get_mut(id) {
+                        n.fill = fill.clone();
+                    }
+                }
+                self.commit();
+            }
+            c if (NODE_SHAPE..NODE_SHAPE + 4).contains(&c) => {
+                let shape = [NShape::Box, NShape::Ellipse, NShape::Diamond, NShape::Text][(c - NODE_SHAPE) as usize];
+                self.begin();
+                self.text_box = None;
+                for id in &sel {
+                    let Some(n) = self.board.get(id).cloned() else { continue };
+                    if n.shape == shape || (shape == NShape::Text && self.board.has_children(id)) {
+                        continue;
+                    }
+                    let was_text = n.shape == NShape::Text;
+                    let node = self.board.get_mut(id).unwrap();
+                    node.shape = shape;
+                    if was_text {
+                        // Room around the text for the new outline.
+                        node.x -= n.pad();
+                        node.y -= n.pad();
+                        node.w += 2.0 * n.pad();
+                        node.h += 2.0 * n.pad();
+                    } else if shape == NShape::Text {
+                        let (cx, cy) = (n.x + n.w * 0.5, n.y + n.h * 0.5);
+                        let (w, h) = self.engine.measure(&n.text, n.font);
+                        let node = self.board.get_mut(id).unwrap();
+                        (node.w, node.h) = (w.max(n.font), h.max(n.font * LINE_H));
+                        (node.x, node.y) = (cx - node.w * 0.5, cy - node.h * 0.5);
+                    }
+                    let text = n.text.clone();
+                    self.apply_text(&TextTarget::Node(id.clone()), &text);
+                }
+                self.commit();
+            }
+            NODE_EDIT => self.edit_selected(),
+            NODE_DUPLICATE => self.duplicate(),
+            NODE_WRAP => self.wrap_selection(),
+            NODE_DELETE => self.delete_selection(false),
+            NODE_DELETE_DEEP => self.delete_selection(true),
+            CANVAS_NEW => {
+                let p = self.menu_at;
+                self.create_at(p, None);
+            }
+            _ => {}
+        }
+        self.rebuild();
+    }
+
+    /// Tab: a new concept to the right of the selected one, connected to
+    /// it, with its text open (while typing: finishes the text first).
+    pub fn tab_new(&mut self) {
+        self.commit_text();
+        let [one] = &self.sel[..] else { return };
+        let Some(n) = self.board.get(one).cloned() else { return };
+        let parent = self.board.parent(&n.id).map(String::from);
+        let p = (n.x + n.w * 1.9, n.y + n.h * 0.5);
+        self.begin();
+        let id = self.place_new(p, parent.as_deref());
+        // The same look as the concept it continues.
+        if n.shape != NShape::Text {
+            let m = self.board.get_mut(&id).unwrap();
+            let (cx, cy) = (m.x + m.w * 0.5, m.y + m.h * 0.5);
+            (m.w, m.h, m.font, m.shape, m.fill) = (n.w, n.h, n.font, n.shape, n.fill.clone());
+            (m.x, m.y) = (cx - n.w * 0.5, cy - n.h * 0.5);
+            let eng = &self.engine;
+            let one = move |n: &Node| view::title_lines(n, &|t: &str, s: f32, w: f32| eng.wrapped_lines(t, s, w));
+            let mut board = std::mem::take(&mut self.board);
+            board.resolve_overlap(&id);
+            board.fit_ancestors(&id, &one);
+            self.board = board;
+        }
+        self.board.add_edge(&n.id, &id, Kind::Link);
+        self.sel = vec![id.clone()];
+        self.sel_edge = None;
+        self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
+        self.mode = Mode::Text { target: TextTarget::Node(id.clone()), text: String::new(), created: true };
+        (self.caret, self.anchor) = (0, 0);
+        self.caret_epoch = Instant::now();
+        self.rebuild();
+        self.show(&id);
+    }
+
+    /// Pans just enough to bring concept `id` into view.
+    fn show(&mut self, id: &str) {
+        let Some(b) = self.board.get(id).map(|n| n.bbox()) else { return };
+        let v = self.engine.view_rect();
+        let m = 24.0 * self.dp();
+        let dx = if b[2] + m > v[2] { v[2] - b[2] - m } else if b[0] - m < v[0] { v[0] - b[0] + m } else { 0.0 };
+        let dy = if b[3] + m > v[3] { v[3] - b[3] - m } else if b[1] - m < v[1] { v[1] - b[1] + m } else { 0.0 };
+        let s = self.engine.cam.s;
+        self.engine.pan(dx as f64 * s, dy as f64 * s);
+    }
+
     /// Ctrl+A on the canvas.
     pub fn select_all_nodes(&mut self) {
         self.sel = self.board.nodes.iter().map(|n| n.id.clone()).collect();
@@ -1578,14 +1889,80 @@ impl Editor {
         (!t.is_empty()).then(|| t.join("\n"))
     }
 
-    /// Ctrl+V on the canvas: a new concept with `text` under the pointer
-    /// (the middle of the view when the pointer is outside the window).
-    pub fn paste_concept(&mut self, text: &str) {
+    /// Ctrl+C on the canvas: the selected concepts with everything nested
+    /// in them and the connections among them, as a board of their own.
+    pub fn copy_selection(&self) -> Option<Board> {
+        let roots = self.sel_roots();
+        if roots.is_empty() {
+            return None;
+        }
+        let ids: HashSet<String> = roots.iter().flat_map(|r| self.board.subtree(r)).collect();
+        let mut b = Board::new();
+        b.nodes = self.board.nodes.iter().filter(|n| ids.contains(&n.id)).cloned().collect();
+        b.edges = self.board.edges.iter().filter(|e| ids.contains(&e.from) && ids.contains(&e.to)).cloned().collect();
+        b.reindex();
+        Some(b)
+    }
+
+    /// The pointer in the world, or the middle of the view when the pointer
+    /// is outside the window.
+    fn paste_point(&mut self) -> Pt {
         let (w, h) = self.engine.size();
         if self.cursor.x < 0.0 || self.cursor.y < 0.0 || self.cursor.x > w as f64 || self.cursor.y > h as f64 {
             self.cursor = Pos { x: w as f64 / 2.0, y: h as f64 / 2.0 };
         }
-        let p = self.world();
+        self.world()
+    }
+
+    /// Ctrl+V of copied concepts: centred under the pointer, nested in what
+    /// is there, fresh ids, one undo step, selected.
+    pub fn paste_board(&mut self, other: Board) {
+        if other.nodes.is_empty() {
+            return;
+        }
+        self.commit_text();
+        let p = self.paste_point();
+        let target = self.board.deepest_at(p.0, p.1, &HashSet::new());
+        self.place_board(other, p, target);
+    }
+
+    /// Ctrl+D: a copy of the selection next to it, at the same level.
+    pub fn duplicate(&mut self) {
+        let Some(other) = self.copy_selection() else { return };
+        let roots = self.sel_roots();
+        let parent = self.board.parent(&roots[0]).map(String::from);
+        let b = other.bounds();
+        let gap = 24.0 * self.dp();
+        self.place_board(other, ((b[0] + b[2]) * 0.5 + gap, (b[1] + b[3]) * 0.5 + gap), parent);
+    }
+
+    fn place_board(&mut self, other: Board, p: Pt, parent: Option<String>) {
+        let ob = other.bounds();
+        let (dx, dy) = (p.0 - (ob[0] + ob[2]) * 0.5, p.1 - (ob[1] + ob[3]) * 0.5);
+        self.begin();
+        let roots = self.board.merge(other, dx, dy);
+        for r in &roots {
+            self.board.set_parent(r, parent.as_deref());
+        }
+        let eng = &self.engine;
+        let one = move |n: &Node| view::title_lines(n, &|t: &str, s: f32, w: f32| eng.wrapped_lines(t, s, w));
+        let mut board = std::mem::take(&mut self.board);
+        for r in &roots {
+            board.fit_ancestors(r, &one);
+            board.resolve_overlap(r);
+            board.fit_ancestors(r, &one);
+        }
+        self.board = board;
+        self.commit();
+        self.sel = roots;
+        self.sel_edge = None;
+        self.rebuild();
+    }
+
+    /// Ctrl+V on the canvas: a new concept with `text` under the pointer
+    /// (the middle of the view when the pointer is outside the window).
+    pub fn paste_concept(&mut self, text: &str) {
+        let p = self.paste_point();
         self.create_at(p, None);
         self.type_text(text);
         self.commit_text();

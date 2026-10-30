@@ -462,6 +462,31 @@ impl State {
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let menu_hover = matches!(crate::chrome::part_at(self.ed.cursor.x, self.ed.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
         crate::chrome::draw(&mut ui, &self.name, menu_hover, ink);
+        if let Some(sr) = &self.ed.search {
+            // Ctrl+F bar: top centre, under the title strip.
+            let s = self.window.scale_factor() as f32;
+            let (w, _) = self.ed.engine.size();
+            let (bw, bh) = ((440.0 * s).min(w as f32 - 32.0 * s), 38.0 * s);
+            let (x, y) = ((w as f32 - bw) * 0.5, crate::chrome::strip_h() as f32 + 6.0 * s);
+            ui.rects.push(Rect { x, y, w: bw, h: bh, fill: rgba(255, 255, 255, 250), stroke: rgba(0, 0, 0, 40), stroke_w: 1.0 * s, radius: 8.0 * s, shape: Shape::Rect });
+            let size = 15.0 * s;
+            let ty = y + (bh - size * hs_core::text::LINE_H) * 0.5;
+            let count = match (sr.query.trim().is_empty(), sr.hits.len()) {
+                (true, _) => String::new(),
+                (false, 0) => "нет".to_string(),
+                (false, n) => format!("{} из {n}", sr.at + 1),
+            };
+            let tx = x + 14.0 * s;
+            let shown = if sr.query.is_empty() { "Поиск по схеме".to_string() } else { sr.query.clone() };
+            let color = if sr.query.is_empty() { rgba(0, 0, 0, 90) } else { ink };
+            let label = Label { x: tx, y: ty, w: bw - 110.0 * s, size, color, align: Align::Left, wrap: false, text: shown };
+            if (self.started.elapsed().as_millis() / 530) % 2 == 0 {
+                let cx = if sr.query.is_empty() { tx } else { tx + self.ed.engine.measure(&sr.query, size).0 };
+                ui.rects.push(Rect { x: cx, y: ty, w: 1.5 * s, h: size * hs_core::text::LINE_H, fill: rgba(0x4a, 0x7d, 0xff, 255), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
+            }
+            ui.labels.push(label);
+            ui.labels.push(Label { x: x + bw - 100.0 * s, y: ty, w: 86.0 * s, size: 13.0 * s, color: rgba(0, 0, 0, 120), align: Align::Right, wrap: false, text: count });
+        }
         if let Some(t) = &self.timeline {
             let s = self.window.scale_factor() as f32;
             let (x, y, w, bh) = self.bar();

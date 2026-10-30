@@ -566,6 +566,41 @@ impl ApplicationHandler for App {
                     _ => None,
                 };
                 use winit::keyboard::KeyCode;
+                if ctrl && letter == Some(KeyCode::KeyF) {
+                    st.ed.search_open();
+                    st.settle();
+                    st.window.request_redraw();
+                    return;
+                }
+                if let Some(sr) = &st.ed.search {
+                    let mut q = sr.query.clone();
+                    match key {
+                        Key::Named(NamedKey::Escape) => st.ed.search_close(),
+                        Key::Named(NamedKey::Enter) => st.ed.search_step(shift),
+                        Key::Named(NamedKey::Backspace) => {
+                            if ctrl {
+                                q.clear();
+                            } else {
+                                q.pop();
+                            }
+                            st.ed.search_set(&q);
+                        }
+                        _ if ctrl && letter == Some(KeyCode::KeyV) => {
+                            if let Some(t) = clip::get() {
+                                q.push_str(&t.replace('\n', " "));
+                                st.ed.search_set(&q);
+                            }
+                        }
+                        _ => {
+                            if let Some(t) = event.text.as_ref().filter(|t| !ctrl && !t.chars().any(char::is_control)) {
+                                q.push_str(t);
+                                st.ed.search_set(&q);
+                            }
+                        }
+                    }
+                    st.window.request_redraw();
+                    return;
+                }
                 if st.editing_text() && ctrl && matches!(letter, Some(KeyCode::KeyZ) | Some(KeyCode::KeyY)) {
                     st.undo(letter == Some(KeyCode::KeyY) || shift);
                     st.window.request_redraw();
@@ -586,6 +621,10 @@ impl ApplicationHandler for App {
                         Key::Named(NamedKey::Home) => tk(st, TextKey::Home),
                         Key::Named(NamedKey::End) => tk(st, TextKey::End),
                         Key::Named(NamedKey::Enter) => st.type_text("\n"),
+                        Key::Named(NamedKey::Tab) => {
+                            st.ed.tab_new();
+                            st.settle();
+                        }
                         _ if ctrl && letter == Some(KeyCode::KeyA) => st.ed.select_all(),
                         _ if ctrl && matches!(letter, Some(KeyCode::KeyC) | Some(KeyCode::KeyX)) => {
                             if let Some(t) = st.ed.selected_text() {
@@ -635,16 +674,11 @@ impl ApplicationHandler for App {
                         Some(KeyCode::KeyN) => st.new_board(),
                         Some(KeyCode::KeyH) => st.open_timeline(),
                         Some(KeyCode::KeyA) => st.ed.select_all_nodes(),
-                        Some(KeyCode::KeyC) => {
-                            if let Some(t) = st.ed.selection_text() {
-                                clip::set(&t);
-                            }
-                        }
-                        Some(KeyCode::KeyV) => {
-                            if let Some(t) = clip::get().filter(|t| !t.trim().is_empty()) {
-                                st.ed.paste_concept(t.trim());
-                                st.settle();
-                            }
+                        Some(KeyCode::KeyC) | Some(KeyCode::KeyX) => st.copy(letter == Some(KeyCode::KeyX)),
+                        Some(KeyCode::KeyV) => st.paste(),
+                        Some(KeyCode::KeyD) => {
+                            st.ed.duplicate();
+                            st.settle();
                         }
                         _ => {}
                     }
@@ -656,6 +690,10 @@ impl ApplicationHandler for App {
                         st.ed.sel_edge = None;
                     }
                     Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F2) => st.edit_selected(),
+                    Key::Named(NamedKey::Tab) => {
+                        st.ed.tab_new();
+                        st.settle();
+                    }
                     Key::Named(NamedKey::Home) => st.ed.engine.fit(),
                     Key::Character("f") | Key::Character("а") if !ctrl => st.ed.engine.fit(),
                     Key::Character("=") | Key::Character("+") => st.ed.engine.zoom_at(1.25, cx, cy),

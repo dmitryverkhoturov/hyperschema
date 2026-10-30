@@ -9,7 +9,8 @@
 //! selected or hovered concept drag out connections.
 
 use crate::State;
-use hs_core::editor::{Pos, Request};
+use hs_core::board::Shape as NShape;
+use hs_core::editor::{Pos, Request, CANVAS_NEW, NODE_COLOR, NODE_DELETE, NODE_DELETE_DEEP, NODE_DUPLICATE, NODE_EDIT, NODE_SHAPE, NODE_WRAP, PALETTE};
 
 impl State {
     /// Whether this press is the second of a double click. Uses the time
@@ -76,6 +77,26 @@ impl State {
         self.settle();
     }
 
+    /// Ctrl+C / Ctrl+X on the canvas: the selected concepts, with their
+    /// text as plain text for other programs.
+    pub fn copy(&mut self, cut: bool) {
+        let Some(b) = self.ed.copy_selection() else { return };
+        crate::clip::set_with(&self.ed.selection_text().unwrap_or_default(), Some(&b.serialize()));
+        if cut {
+            self.delete_selection(true);
+        }
+    }
+
+    /// Ctrl+V on the canvas: copied concepts, or a concept from plain text.
+    pub fn paste(&mut self) {
+        if let Some(b) = crate::clip::get_board().and_then(|j| hs_core::board::Board::parse(&j).ok()) {
+            self.ed.paste_board(b);
+        } else if let Some(t) = crate::clip::get().filter(|t| !t.trim().is_empty()) {
+            self.ed.paste_concept(t.trim());
+        }
+        self.settle();
+    }
+
     pub fn type_text(&mut self, s: &str) {
         self.ed.type_text(s);
     }
@@ -85,7 +106,68 @@ impl State {
         for c in std::mem::take(&mut self.ed.done) {
             self.record(c);
         }
-        if let Some(Request::EdgeMenu { edge, x, y }) = self.ed.request.take() {
+        match self.ed.request.take() {
+            Some(Request::NodeMenu { x, y }) => self.node_menu(x, y),
+            Some(Request::CanvasMenu { x, y }) => {
+                let items = vec![(CANVAS_NEW, "Новый блок здесь".to_string(), false), (1, "Вставить\tCtrl+V".to_string(), false)];
+                match self.menu_choice(x, y, &items) {
+                    1 => self.paste(),
+                    c => self.ed.apply_node_choice(c),
+                }
+            }
+            Some(Request::EdgeMenu { edge, x, y }) => self.edge_menu(edge, x, y),
+            None => {}
+        }
+        for c in std::mem::take(&mut self.ed.done) {
+            self.record(c);
+        }
+    }
+
+    fn menu_choice(&mut self, x: f64, y: f64, items: &[(i32, String, bool)]) -> i32 {
+        if self.script.is_some() {
+            self.script_choice.take().unwrap_or(0)
+        } else {
+            crate::chrome::popup(x, y, items)
+        }
+    }
+
+    fn node_menu(&mut self, x: f64, y: f64) {
+        let sel: Vec<_> = self.ed.sel.iter().filter_map(|id| self.ed.board.get(id).cloned()).collect();
+        let Some(first) = sel.first() else { return };
+        let mut items = vec![(-2, "Цвет".to_string(), false)];
+        for (k, (name, c)) in PALETTE.iter().enumerate() {
+            items.push((NODE_COLOR + k as i32, name.to_string(), first.fill.as_deref() == *c));
+        }
+        items.push((-1, String::new(), false));
+        items.push((-2, "Форма".to_string(), false));
+        let parent = sel.iter().any(|n| self.ed.board.has_children(&n.id));
+        for (k, (name, shape)) in [("Прямоугольник", NShape::Box), ("Овал", NShape::Ellipse), ("Ромб", NShape::Diamond), ("Текст без рамки", NShape::Text)].into_iter().enumerate() {
+            if shape == NShape::Text && parent {
+                continue;
+            }
+            items.push((NODE_SHAPE + k as i32, name.to_string(), first.shape == shape));
+        }
+        items.push((-1, String::new(), false));
+        items.push((0, String::new(), false));
+        if sel.len() == 1 {
+            items.push((NODE_EDIT, "Изменить текст\tEnter".to_string(), false));
+        }
+        items.push((NODE_DUPLICATE, "Дублировать\tCtrl+D".to_string(), false));
+        items.push((1, "Копировать\tCtrl+C".to_string(), false));
+        items.push((NODE_WRAP, "Обернуть в блок\tCtrl+G".to_string(), false));
+        items.push((0, String::new(), false));
+        items.push((NODE_DELETE, "Удалить\tDel".to_string(), false));
+        if parent {
+            items.push((NODE_DELETE_DEEP, "Удалить с содержимым\tShift+Del".to_string(), false));
+        }
+        match self.menu_choice(x, y, &items) {
+            1 => self.copy(false),
+            c => self.ed.apply_node_choice(c),
+        }
+    }
+
+    fn edge_menu(&mut self, edge: String, x: f64, y: f64) {
+        {
             let Some(e) = self.ed.board.edge(&edge).cloned() else { return };
             let items = vec![
                 (1, "Без направления".to_string(), !e.arrow_from && !e.arrow_to),
@@ -96,11 +178,8 @@ impl State {
                 (5, "Подпись…".to_string(), false),
                 (6, "Удалить связь".to_string(), false),
             ];
-            let choice = if self.script.is_some() { self.script_choice.take().unwrap_or(0) } else { crate::chrome::popup(x, y, &items) };
+            let choice = self.menu_choice(x, y, &items);
             self.ed.apply_edge_choice(&edge, choice);
-            for c in std::mem::take(&mut self.ed.done) {
-                self.record(c);
-            }
         }
     }
 }

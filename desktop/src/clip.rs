@@ -1,15 +1,29 @@
 //! The Windows clipboard, plain text only.
 
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
+/// Our own format: copied concepts as board JSON, next to the plain text.
+fn board_format() -> u32 {
+    unsafe { RegisterClipboardFormatW(windows::core::w!("Hyperschema.Board")) }
+}
+
 pub fn get() -> Option<String> {
+    read(CF_UNICODETEXT.0 as u32)
+}
+
+/// Copied concepts, if the clipboard holds ours.
+pub fn get_board() -> Option<String> {
+    read(board_format())
+}
+
+fn read(format: u32) -> Option<String> {
     unsafe {
         OpenClipboard(None).ok()?;
         let out = (|| {
-            let h = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
+            let h = GetClipboardData(format).ok()?;
             let g = HGLOBAL(h.0);
             let p = GlobalLock(g) as *const u16;
             if p.is_null() {
@@ -30,22 +44,36 @@ pub fn get() -> Option<String> {
 }
 
 pub fn set(text: &str) {
-    let wide: Vec<u16> = text.replace('\n', "\r\n").encode_utf16().chain(Some(0)).collect();
+    set_with(text, None);
+}
+
+/// Plain text, plus copied concepts in our own format.
+pub fn set_with(text: &str, board: Option<&str>) {
     unsafe {
         if OpenClipboard(None).is_err() {
             return;
         }
         let _ = EmptyClipboard();
+        put(CF_UNICODETEXT.0 as u32, &text.replace('\n', "\r\n"));
+        if let Some(b) = board {
+            put(board_format(), b);
+        }
+        let _ = CloseClipboard();
+    }
+}
+
+unsafe fn put(format: u32, text: &str) {
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
         if let Ok(g) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
             let p = GlobalLock(g) as *mut u16;
             if !p.is_null() {
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
                 let _ = GlobalUnlock(g);
-                if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(g.0))).is_err() {
+                if SetClipboardData(format, Some(HANDLE(g.0))).is_err() {
                     let _ = GlobalFree(Some(g));
                 }
             }
         }
-        let _ = CloseClipboard();
     }
 }

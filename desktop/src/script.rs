@@ -6,8 +6,8 @@
 //! move X Y | down [alt] [shift] | up | rdown | click X Y | dbl X Y
 //! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
 //! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group
-//! key left|right|up|down|home|end|del|selall|copy|cut|paste [shift] [ctrl]
-//! choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
+//! key left|right|up|down|home|end|del|selall|copy|cut|paste|dup|tab [shift] [ctrl]
+//! find TEXT|next|prev|close | wait MS | choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
 //! timeline open|seek N|restore|close | shot out.png | state | tree | quit
 //! (# starts a comment)
 
@@ -132,27 +132,46 @@ impl State {
                     self.ed.text_key(tk, has("shift"), has("ctrl"));
                 }
                 "selall" => self.ed.select_all(),
+                "tab" => {
+                    self.ed.tab_new();
+                    self.settle();
+                }
+                "copy" | "cut" if !self.editing_text() => self.copy(w[1] == "cut"),
+                "dup" => {
+                    self.ed.duplicate();
+                    self.settle();
+                }
                 "copy" | "cut" => {
-                    if let Some(t) = self.ed.selected_text().or_else(|| self.ed.selection_text()) {
+                    if let Some(t) = self.ed.selected_text() {
                         crate::clip::set(&t);
                         if w[1] == "cut" {
                             self.ed.text_key(hs_core::editor::TextKey::Delete, false, false);
                         }
                     }
                 }
+                "paste" if !self.editing_text() => self.paste(),
                 "paste" => {
                     if let Some(t) = crate::clip::get() {
-                        if self.editing_text() {
-                            self.type_text(&t);
-                        } else {
-                            self.ed.paste_concept(t.trim());
-                            self.settle();
-                        }
+                        self.type_text(&t);
                     }
                 }
                 other => note = format!("unknown key {other}"),
             },
             "choose" => self.script_choice = Some(n(1) as i32),
+            // find TEXT | find next | find prev | find close
+            "find" => match w.get(1).copied().unwrap_or("") {
+                "next" => self.ed.search_step(false),
+                "prev" => self.ed.search_step(true),
+                "close" => self.ed.search_close(),
+                _ => {
+                    self.ed.search_open();
+                    let q = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
+                    self.ed.search_set(&q);
+                    let sr = self.ed.search.as_ref().unwrap();
+                    note = format!("{} hits", sr.hits.len());
+                }
+            },
+            "wait" => std::thread::sleep(std::time::Duration::from_millis(n(1) as u64)),
             "wheel" => {
                 let (x, y) = (self.ed.cursor.x, self.ed.cursor.y);
                 self.ed.engine.zoom_at(1.18f64.powf(n(1)), x, y);

@@ -54,8 +54,9 @@ fn vs_rect(@builtin(vertex_index) vi: u32, r: RectIn) -> RectOut {
     let real = r.xywh.zw * 0.5 * s;
     let half = max(real, vec2<f32>(0.5));
     let c = to_screen(r.xywh.xy + r.xywh.zw * 0.5);
-    // Outlines stay visible down to a pixel: most schemes are stroke-only boxes.
-    let sw = select(0.0, max(r.sw * s, 1.0), (r.stroke >> 24u) > 0u);
+    // Outlines stay visible down to a pixel (most schemes are stroke-only
+    // boxes) and never grow into slabs on huge concepts.
+    let sw = select(0.0, clamp(r.sw * s, 1.0, 3.0), (r.stroke >> 24u) > 0u);
     let pad = 1.0 + sw;
     let local = corner(vi) * (half + pad);
     var o: RectOut;

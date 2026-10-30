@@ -46,7 +46,8 @@ impl IDirectManipulationViewportEventHandler_Impl for Handler_Impl {
     ) -> Result<()> {
         let needs_reset = {
             let mut s = self.shared.borrow_mut();
-            s.running = current == DIRECTMANIPULATION_RUNNING;
+            // A pan keeps gliding after the fingers lift (inertia).
+            s.running = current == DIRECTMANIPULATION_RUNNING || current == DIRECTMANIPULATION_INERTIA;
             if current == DIRECTMANIPULATION_READY {
                 s.contact = false;
             }
@@ -129,6 +130,7 @@ impl Dm {
                 DIRECTMANIPULATION_CONFIGURATION_INTERACTION.0
                     | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_X.0
                     | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_Y.0
+                    | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_INERTIA.0
                     | DIRECTMANIPULATION_CONFIGURATION_SCALING.0,
             ))?;
             viewport.SetViewportOptions(DIRECTMANIPULATION_VIEWPORT_OPTIONS_MANUALUPDATE)?;
