@@ -685,11 +685,13 @@ impl ApplicationHandler for App {
                 }
                 match key {
                     Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => st.delete_selection(shift),
+                    Key::Named(NamedKey::Escape) if st.ed.path_active() => st.ed.path_exit(),
                     Key::Named(NamedKey::Escape) => {
                         st.ed.sel.clear();
                         st.ed.sel_edge = None;
                     }
                     Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F2) => st.edit_selected(),
+                    _ if !ctrl && letter == Some(KeyCode::KeyP) => st.ed.path_enter(),
                     Key::Named(NamedKey::Tab) => {
                         st.ed.tab_new();
                         st.settle();

@@ -15,6 +15,7 @@ pub mod scene;
 pub mod spatial;
 pub mod text;
 pub mod touch;
+pub mod trail;
 pub mod view;
 
 pub use engine::{Camera, Engine, Stats};

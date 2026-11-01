@@ -462,6 +462,10 @@ impl State {
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let menu_hover = matches!(crate::chrome::part_at(self.ed.cursor.x, self.ed.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
         crate::chrome::draw(&mut ui, &self.name, menu_hover, ink);
+        let bar = self.ed.path_ui(crate::chrome::strip_h() as f32);
+        ui.rects.extend(bar.rects);
+        ui.lines.extend(bar.lines);
+        ui.labels.extend(bar.labels);
         if let Some(sr) = &self.ed.search {
             // Ctrl+F bar: top centre, under the title strip.
             let s = self.window.scale_factor() as f32;

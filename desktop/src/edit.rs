@@ -10,7 +10,7 @@
 
 use crate::State;
 use hs_core::board::Shape as NShape;
-use hs_core::editor::{Pos, Request, CANVAS_NEW, NODE_COLOR, NODE_DELETE, NODE_DELETE_DEEP, NODE_DUPLICATE, NODE_EDIT, NODE_SHAPE, NODE_WRAP, PALETTE};
+use hs_core::editor::{Pos, Request, CANVAS_NEW, NODE_COLOR, NODE_DELETE, NODE_DELETE_DEEP, NODE_DUPLICATE, NODE_EDIT, NODE_PATH, NODE_SHAPE, NODE_WRAP, PALETTE};
 
 impl State {
     /// Whether this press is the second of a double click. Uses the time
@@ -151,6 +151,7 @@ impl State {
         items.push((0, String::new(), false));
         if sel.len() == 1 {
             items.push((NODE_EDIT, "Изменить текст\tEnter".to_string(), false));
+            items.push((NODE_PATH, "Путь по связям\tP".to_string(), false));
         }
         items.push((NODE_DUPLICATE, "Дублировать\tCtrl+D".to_string(), false));
         items.push((1, "Копировать\tCtrl+C".to_string(), false));

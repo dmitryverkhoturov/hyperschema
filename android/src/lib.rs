@@ -228,6 +228,9 @@ pub extern "system" fn Java_com_hyperschema_app_Native_setNested(_env: JNIEnv, _
 pub extern "system" fn Java_com_hyperschema_app_Native_render(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
     let a = app(h);
     a.ed.refresh_overlay();
+    let top = a.ed.ui_top;
+    let ui = a.ed.path_ui(top);
+    a.ed.engine.set_ui(&ui);
     a.ed.engine.render() as jboolean
 }
 
@@ -286,7 +289,7 @@ pub extern "system" fn Java_com_hyperschema_app_Native_poll(mut env: JNIEnv, _c:
         }
     }
     if matches!(a.ed.mode, Mode::Idle | Mode::Text { .. }) && !a.ed.sel.is_empty() {
-        if let Some(b) = a.ed.board.bounds_of(a.ed.sel.iter()) {
+        if let Some(b) = a.ed.shown().bounds_of(a.ed.sel.iter()) {
             let e = &a.ed.engine;
             let (s, (w, hh)) = (e.cam.s, e.size());
             let sx = |x: f32| (x as f64 - e.cam.cx) * s + w as f64 * 0.5;
@@ -385,7 +388,26 @@ pub extern "system" fn Java_com_hyperschema_app_Native_undo(_env: JNIEnv, _c: JC
 #[no_mangle]
 pub extern "system" fn Java_com_hyperschema_app_Native_canUndo(_env: JNIEnv, _c: JClass, h: jlong, redo: jboolean) -> jboolean {
     let a = app(h);
-    (a.editable && if redo != 0 { !a.ed.redo_stack.is_empty() } else { !a.ed.undo_stack.is_empty() || a.ed.editing_text() }) as jboolean
+    let walk = a.ed.trail.as_ref().is_some_and(|t| !t.leaving && t.links.len() > 1);
+    (a.editable && if redo != 0 { !a.ed.redo_stack.is_empty() } else { !a.ed.undo_stack.is_empty() || a.ed.editing_text() || walk }) as jboolean
+}
+
+/// Screen y (px) under the shell's top buttons, where the path bar goes.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setTop(_env: JNIEnv, _c: JClass, h: jlong, top: jfloat) {
+    app(h).ed.ui_top = top;
+}
+
+/// System back: leaves the walk if one is on (true), else does nothing.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_pathExit(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
+    let a = app(h);
+    if !a.ed.path_active() {
+        return 0;
+    }
+    a.ed.path_exit();
+    a.settle();
+    1
 }
 
 #[no_mangle]

@@ -18,8 +18,38 @@ pub fn title_lines(n: &Node, m: Measure) -> usize {
 }
 
 pub fn node_into(board: &Board, n: &Node, m: Measure, out: &mut Scene) {
-    let stroke = parse_color(n.color.as_deref().unwrap_or(INK), 1.0);
-    let fill = n.fill.as_deref().map_or(0, |c| parse_color(c, 1.0));
+    node_styled(board, n, m, Look::Plain, out)
+}
+
+/// How a concept is drawn in path mode: dimmed behind the walk, or out
+/// in front of it (on a card of the canvas colour, so the dim stays behind).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Look {
+    Plain,
+    Dim,
+    Card,
+}
+
+/// Mixes a colour toward the canvas: `k` = 1 is the canvas itself.
+pub fn fade(c: u32, k: f32) -> u32 {
+    if c >> 24 == 0 {
+        return c;
+    }
+    let bg = bg_color();
+    let ch = |v: u32, s: u32| ((((v >> s) & 255) as f32) * (1.0 - k) + (((bg >> s) & 255) as f32) * k) as u32;
+    ch(c, 0) | ch(c, 8) << 8 | ch(c, 16) << 16 | (c & 0xff00_0000)
+}
+
+const DIM: f32 = 0.82;
+
+pub fn node_styled(board: &Board, n: &Node, m: Measure, look: Look, out: &mut Scene) {
+    let k = if look == Look::Dim { DIM } else { 0.0 };
+    let stroke = fade(parse_color(n.color.as_deref().unwrap_or(INK), 1.0), k);
+    let fill = match (n.fill.as_deref(), look) {
+        (Some(c), _) => fade(parse_color(c, 1.0), k),
+        (None, Look::Card) => bg_color(),
+        (None, _) => 0,
+    };
     let sw = (n.font * 0.08).max(0.0);
     let shape = match n.shape {
         NShape::Box => Some(Shape::Rect),
@@ -54,12 +84,17 @@ pub fn edge_font(board: &Board, from: &str, to: &str) -> f32 {
 }
 
 pub fn edge_into(board: &Board, eid: &str, path: &[Pt], m: Measure, bg: u32, out: &mut Scene) {
+    edge_styled(board, eid, path, m, bg, false, out)
+}
+
+pub fn edge_styled(board: &Board, eid: &str, path: &[Pt], m: Measure, bg: u32, dim: bool, out: &mut Scene) {
     let Some(e) = board.edge(eid) else { return };
+    let k = if dim { DIM } else { 0.0 };
     if path.len() < 2 {
         return;
     }
     let font = edge_font(board, &e.from, &e.to);
-    let color = parse_color(EDGE_INK, 1.0);
+    let color = fade(parse_color(EDGE_INK, 1.0), k);
     let width = font * 0.08;
     let n = path.len();
     for i in 1..n {
@@ -79,7 +114,7 @@ pub fn edge_into(board: &Board, eid: &str, path: &[Pt], m: Measure, bg: u32, out
         let tw = label_width(&e.label, size, w, m);
         let h = lines * LINE_H * size;
         out.rects.push(Rect { x: c.0 - tw * 0.5 - size * 0.3, y: c.1 - h * 0.5, w: tw + size * 0.6, h, fill: bg, stroke: 0, stroke_w: 0.0, radius: size * 0.3, shape: Shape::Rect });
-        out.labels.push(Label { x: c.0 - w * 0.5, y: c.1 - h * 0.5, w, size, color: parse_color(INK, 1.0), align: Align::Center, wrap: true, text: e.label.clone() });
+        out.labels.push(Label { x: c.0 - w * 0.5, y: c.1 - h * 0.5, w, size, color: fade(parse_color(INK, 1.0), k), align: Align::Center, wrap: true, text: e.label.clone() });
     }
 }
 
@@ -95,21 +130,27 @@ fn label_width(text: &str, size: f32, w: f32, m: Measure) -> f32 {
 pub struct Skip<'a> {
     pub nodes: &'a HashSet<String>,
     pub edges: &'a HashSet<String>,
+    /// Path mode: what is out in front. The scene keeps the rest, dimmed;
+    /// the overlay draws the walk on top (the scene's draw order is spatial,
+    /// so only a separate layer stays reliably in front).
+    pub bright: Option<&'a HashSet<String>>,
 }
 
 pub fn build(board: &Board, routes: &HashMap<String, Vec<Pt>>, m: Measure, skip: &Skip, bg: u32) -> Scene {
     let mut s = Scene::default();
+    let lit = |id: &str| skip.bright.is_some_and(|b| b.contains(id));
+    let look = if skip.bright.is_some() { Look::Dim } else { Look::Plain };
     for id in board.draw_order() {
-        if !skip.nodes.contains(&id) {
-            node_into(board, board.node(&id), m, &mut s);
+        if !skip.nodes.contains(&id) && !lit(&id) {
+            node_styled(board, board.node(&id), m, look, &mut s);
         }
     }
     for e in &board.edges {
-        if skip.edges.contains(&e.id) {
+        if skip.edges.contains(&e.id) || (lit(&e.from) && lit(&e.to)) {
             continue;
         }
         if let Some(p) = routes.get(&e.id) {
-            edge_into(board, &e.id, p, m, bg, &mut s);
+            edge_styled(board, &e.id, p, m, bg, look == Look::Dim, &mut s);
         }
     }
     s

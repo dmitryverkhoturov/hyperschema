@@ -10,6 +10,8 @@ use crate::board::{contains, Bbox, Board, Change, Kind, Node, Shape as NShape, S
 use crate::route::{self, midpoint, seg_dist, Pt};
 use crate::scene::{rgba, Align, Label, Line, Rect, Scene, Shape};
 use crate::text::LINE_H;
+use crate::trail::Trail;
+use crate::view::Look;
 use crate::{view, Engine};
 use serde_json::Map;
 use std::collections::{HashMap, HashSet};
@@ -55,6 +57,7 @@ pub const NODE_DUPLICATE: i32 = 31;
 pub const NODE_WRAP: i32 = 32;
 pub const NODE_DELETE: i32 = 33;
 pub const NODE_DELETE_DEEP: i32 = 34;
+pub const NODE_PATH: i32 = 35;
 pub const CANVAS_NEW: i32 = 40;
 
 const BLUE: (u8, u8, u8) = (0x4a, 0x7d, 0xff);
@@ -62,6 +65,14 @@ const BLUE: (u8, u8, u8) = (0x4a, 0x7d, 0xff);
 fn blue(a: u8) -> u32 {
     rgba(BLUE.0, BLUE.1, BLUE.2, a)
 }
+
+/// The colour of the walked path.
+fn path_red(a: u8) -> u32 {
+    rgba(0xe0, 0x3a, 0x3a, a)
+}
+
+/// What a tap on the path bar hits: back (leave the walk) or a link index.
+pub const BAR_BACK: i32 = -1;
 
 /// Resize handle: which edges move (bit 0 left, 1 right, 2 top, 3 bottom).
 pub type Handle = u8;
@@ -89,6 +100,9 @@ pub enum Mode {
     Connect { from: String },
     EdgeEnd { edge: String, moving_from: bool },
     Text { target: TextTarget, text: String, created: bool },
+    /// Path mode: a concept out of the walk dragged to a new spot (only
+    /// where it is drawn; the board does not move).
+    PathDrag { id: String, start: (f64, f64), base: (f32, f32) },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -180,6 +194,14 @@ pub struct Editor {
     /// Steps committed since the shell last took them (for history and saving).
     pub done: Vec<Change>,
     pub request: Option<Request>,
+    /// Path mode: the walk, and the board as drawn with its offsets.
+    pub trail: Option<Trail>,
+    display: Option<Board>,
+    /// The last walk, so leaving by mistake loses nothing.
+    last_trail: Vec<String>,
+    /// Screen y where the path bar starts (under the shell's own strip).
+    pub ui_top: f32,
+    bar_hits: Vec<([f32; 4], i32)>,
 }
 
 impl Editor {
@@ -217,6 +239,11 @@ impl Editor {
             step_base: None,
             done: Vec::new(),
             request: None,
+            trail: None,
+            display: None,
+            last_trail: Vec::new(),
+            ui_top: 0.0,
+            bar_hits: Vec::new(),
         }
     }
 
@@ -233,6 +260,8 @@ impl Editor {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.step_base = None;
+        self.trail = None;
+        self.last_trail.clear();
         self.rebuild();
     }
 
@@ -332,20 +361,75 @@ impl Editor {
 
     /// The board on screen: the timeline preview while browsing history.
     pub fn shown(&self) -> &Board {
-        self.preview.as_ref().unwrap_or(&self.board)
+        self.preview.as_ref().or(self.display.as_ref()).unwrap_or(&self.board)
     }
 
     // ------------------------------------------------------------ scene
 
     /// Rebuilds routes and the indexed scene, minus what the overlay draws.
     pub fn rebuild(&mut self) {
+        self.sync_trail();
         let board = self.shown().clone();
         self.raw_routes = route::raw_routes(&board, self.show_nested_links, None, &HashMap::new());
         self.routes = route::finish(&board, &self.raw_routes);
+        self.build_scene(&board);
+    }
+
+    fn build_scene(&mut self, board: &Board) {
+        let bright = self.trail.as_ref().filter(|t| !t.leaving).map(|t| t.bright(&self.board));
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
-        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges };
-        let scene = view::build(&board, &self.routes, &m, &skip, view::bg_color());
+        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges, bright: bright.as_ref() };
+        let scene = view::build(board, &self.routes, &m, &skip, view::bg_color());
         self.engine.set_scene(scene);
+    }
+
+    /// While concepts slide: only their connections are routed again
+    /// (straight around their ends), the rest keep their routes.
+    fn rebuild_moving(&mut self) {
+        let Some(t) = &self.trail else { return };
+        let moving_ids = t.moving();
+        self.display = Some(t.display(&self.board));
+        let board = self.shown().clone();
+        let mut moving: HashSet<String> = HashSet::new();
+        for id in moving_ids {
+            if board.get(&id).is_some() {
+                moving.extend(board.subtree(&id));
+            }
+        }
+        for e in &board.edges {
+            if (moving.contains(&e.from) || moving.contains(&e.to)) && route::shown(&board, e, self.show_nested_links) {
+                if let (Some(a), Some(b)) = (board.get(&e.from), board.get(&e.to)) {
+                    self.routes.insert(e.id.clone(), route::route_between(&board, a, b));
+                }
+            }
+        }
+        self.build_scene(&board);
+    }
+
+    /// Keeps the walk in step with the board (deleted and new concepts)
+    /// and refreshes the board as drawn.
+    fn sync_trail(&mut self) {
+        let Some(t) = &mut self.trail else {
+            self.display = None;
+            return;
+        };
+        if !t.leaving {
+            let moves = t.sync(&self.board);
+            // A concept made where the current one is drawn moves to lie
+            // beside it on the board too; only inside an action, so the
+            // move is part of that step.
+            if self.step_base.is_some() {
+                for (id, o) in moves {
+                    self.board.move_tree(&id, o.0, o.1);
+                }
+            }
+            if t.links.is_empty() {
+                self.trail = None;
+                self.display = None;
+                return;
+            }
+        }
+        self.display = Some(t.display(&self.board));
     }
 
     fn hide(&mut self, nodes: HashSet<String>, edges: HashSet<String>) {
@@ -367,6 +451,7 @@ impl Editor {
         match self.mode {
             Mode::Move { .. } => self.drag_move(),
             Mode::Resize { .. } => self.drag_resize(),
+            Mode::PathDrag { .. } => self.drag_path(),
             _ => {}
         }
         if let Some(p) = std::env::var_os("HS_PROF") {
@@ -382,10 +467,12 @@ impl Editor {
     pub fn refresh_overlay(&mut self) {
         self.flush_drag();
         self.fly();
+        self.tick_trail();
         let mut ov = Scene::default();
         let px = self.px();
         let board = self.shown().clone();
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
+        self.walk_into(&board, &mut ov);
         // Live elements.
         for id in board.draw_order() {
             if self.hidden_nodes.contains(&id) {
@@ -551,13 +638,222 @@ impl Editor {
         Some(route::route_between(b, b.get(&e.from)?, b.get(&e.to)?))
     }
 
+    fn tick_trail(&mut self) {
+        let Some(t) = &mut self.trail else { return };
+        if !t.animating() {
+            return;
+        }
+        t.tick();
+        let (done, leaving) = (!t.animating(), t.leaving);
+        if done && leaving {
+            self.trail = None;
+            self.rebuild();
+        } else if done {
+            self.rebuild();
+        } else {
+            self.rebuild_moving();
+        }
+    }
+
+    /// The walk on top of the dimmed board: concepts out on cards, their
+    /// connections, the path line, the current concept, "+N" badges.
+    fn walk_into(&self, board: &Board, ov: &mut Scene) {
+        let Some(t) = self.trail.as_ref().filter(|t| !t.leaving) else { return };
+        let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
+        let bright = t.bright(&self.board);
+        let walk: Vec<&String> = t.links.iter().chain(t.touched.iter()).collect();
+        for id in board.draw_order() {
+            if bright.contains(&id) && !self.hidden_nodes.contains(&id) {
+                // A frame around the walk keeps the dimmed things it holds visible.
+                let around = walk.iter().any(|w| board.is_ancestor(&id, w));
+                view::node_styled(board, board.node(&id), &m, if around { Look::Plain } else { Look::Card }, ov);
+            }
+        }
+        for e in &board.edges {
+            if bright.contains(&e.from) && bright.contains(&e.to) && !self.hidden_edges.contains(&e.id) {
+                if let Some(p) = self.routes.get(&e.id) {
+                    view::edge_into(board, &e.id, p, &m, view::bg_color(), ov);
+                }
+            }
+        }
+        let dp = self.dp();
+        for w in t.links.windows(2) {
+            let (Some(a), Some(b)) = (board.get(&w[0]), board.get(&w[1])) else { continue };
+            let p = board
+                .edge_between(&w[0], &w[1])
+                .and_then(|k| self.routes.get(&board.edges[k].id).cloned())
+                .unwrap_or_else(|| route::clip(&[a.center(), b.center()], &a.bbox(), &b.bbox()));
+            for s in p.windows(2) {
+                ov.lines.push(Line { x0: s[0].0, y0: s[0].1, x1: s[1].0, y1: s[1].1, color: path_red(200), width: 3.5 * dp, head: false });
+            }
+        }
+        if let Some(n) = board.get(t.current()) {
+            let b = n.bbox();
+            let pad = 5.0 * dp;
+            ov.rects.push(Rect { x: b[0] - pad, y: b[1] - pad, w: b[2] - b[0] + 2.0 * pad, h: b[3] - b[1] + 2.0 * pad, fill: 0, stroke: path_red(255), stroke_w: 2.5 * dp, radius: 4.0 * dp, shape: Shape::Rect });
+        }
+        for id in t.out() {
+            let k = t.unopened(&self.board, &id);
+            let Some(n) = board.get(&id).filter(|_| k > 0) else { continue };
+            let size = 11.0 * dp;
+            let text = format!("+{k}");
+            let w = size * (0.62 * text.chars().count() as f32 + 1.0);
+            let h = size * 1.5;
+            let (x, y) = (n.x + n.w - w * 0.6, n.y - h * 0.55);
+            ov.rects.push(Rect { x, y, w, h, fill: path_red(255), stroke: 0, stroke_w: 0.0, radius: h * 0.5, shape: Shape::Rect });
+            ov.labels.push(Label { x, y: y + (h - size * LINE_H) * 0.5, w, size, color: rgba(255, 255, 255, 255), align: Align::Center, wrap: false, text });
+        }
+    }
+
     fn handles_visible(&self) -> bool {
-        matches!(self.mode, Mode::Idle | Mode::Resize { .. } | Mode::Press { .. }) && !self.frozen
+        matches!(self.mode, Mode::Idle | Mode::Resize { .. } | Mode::Press { .. }) && !self.frozen && !self.path_active()
     }
 
     /// True while the overlay changes by itself (caret blink).
     pub fn animating(&self) -> bool {
-        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some()
+        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some() || self.trail.as_ref().is_some_and(|t| t.animating())
+    }
+
+    // ------------------------------------------------------------ path mode
+
+    /// The walk is on (not just sliding back after it ended).
+    pub fn path_active(&self) -> bool {
+        self.trail.as_ref().is_some_and(|t| !t.leaving)
+    }
+
+    /// "Путь": starts walking from the selected concept (one of the last
+    /// walk's links brings that walk back).
+    pub fn path_enter(&mut self) {
+        self.commit_text();
+        let [one] = &self.sel[..] else { return };
+        let one = one.clone();
+        if self.board.get(&one).is_none() {
+            return;
+        }
+        let links = if self.last_trail.contains(&one) { self.last_trail.clone() } else { vec![one] };
+        self.trail = Some(Trail::new(&self.board, links, self.undo_stack.len()));
+        self.after_step();
+    }
+
+    /// Back arrow or Esc: everything slides home; the walk is remembered.
+    pub fn path_exit(&mut self) {
+        self.commit_text();
+        let Some(t) = &mut self.trail else { return };
+        if t.leaving {
+            return;
+        }
+        self.last_trail = t.links.clone();
+        t.leave();
+        self.mode = Mode::Idle;
+        self.rebuild();
+    }
+
+    /// After the walk changed: the current concept selected, the camera
+    /// takes in it and what came out.
+    fn after_step(&mut self) {
+        let Some(t) = &self.trail else { return };
+        self.sel = vec![t.current().to_string()];
+        self.sel_edge = None;
+        let mut b: Option<Bbox> = None;
+        let mut ids: Vec<String> = t.open.clone();
+        ids.push(t.current().to_string());
+        for id in &ids {
+            let Some(n) = self.board.get(id) else { continue };
+            let o = t.target_of(&self.board, id);
+            let nb = [n.x + o.0, n.y + o.1, n.x + n.w + o.0, n.y + n.h + o.1];
+            b = Some(b.map_or(nb, |a| [a[0].min(nb[0]), a[1].min(nb[1]), a[2].max(nb[2]), a[3].max(nb[3])]));
+        }
+        self.rebuild();
+        let Some(b) = b else { return };
+        // Keep the zoom unless it all does not fit; centre on it.
+        let (w, h) = self.engine.size();
+        let cam = &self.engine.cam;
+        let fit = ((w as f64 / (b[2] - b[0]).max(1.0) as f64).min((h as f64 - self.ui_top as f64) / (b[3] - b[1]).max(1.0) as f64)) * 0.8;
+        let s = cam.s.min(fit);
+        let to = ((b[0] + b[2]) as f64 * 0.5, (b[1] + b[3]) as f64 * 0.5 - self.ui_top as f64 * 0.25 / s, s);
+        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: crate::trail::EASE_MS + 100.0 });
+    }
+
+    /// The path bar in screen pixels: back arrow, then the links. Shells
+    /// put it in their screen layer each frame; taps on it go to `press`.
+    pub fn path_ui(&mut self, top: f32) -> Scene {
+        self.ui_top = top;
+        self.bar_hits.clear();
+        let mut ui = Scene::default();
+        let Some(t) = self.trail.as_ref().filter(|t| !t.leaving) else { return ui };
+        let s = self.ui;
+        let (w, _) = self.engine.size();
+        let (h, size) = (36.0 * s, 14.0 * s);
+        let (x0, y) = (10.0 * s, top + 8.0 * s);
+        let ink = rgba(0x2a, 0x2a, 0x2a, 255);
+        let name = |id: &str| {
+            let t = self.board.get(id).map_or(String::new(), |n| n.text.split('\n').next().unwrap_or("").trim().to_string());
+            let t = if t.is_empty() { "без названия".to_string() } else { t };
+            if t.chars().count() > 18 {
+                format!("{}…", t.chars().take(17).collect::<String>())
+            } else {
+                t
+            }
+        };
+        let sep = "  ›  ";
+        let sep_w = self.engine.measure(sep, size).0;
+        let pad = 12.0 * s;
+        let room = w as f32 - x0 * 2.0 - h - pad;
+        // Links from the end while they fit; the rest fold into "…".
+        let mut items: Vec<(i32, String, f32)> = Vec::new();
+        let mut used = 0.0;
+        for (k, id) in t.links.iter().enumerate().rev() {
+            let n = name(id);
+            let nw = self.engine.measure(&n, size).0;
+            let add = nw + if items.is_empty() { 0.0 } else { sep_w };
+            if used + add > room && !items.is_empty() {
+                let ew = self.engine.measure("…", size).0;
+                items.insert(0, (-2, "…".into(), ew));
+                break;
+            }
+            used += add;
+            items.insert(0, (k as i32, n, nw));
+        }
+        let total = h + items.iter().map(|i| i.2).sum::<f32>() + sep_w * (items.len().saturating_sub(1)) as f32 + pad;
+        ui.rects.push(Rect { x: x0, y, w: total, h, fill: rgba(255, 255, 255, 245), stroke: rgba(0, 0, 0, 35), stroke_w: 1.0 * s, radius: 10.0 * s, shape: Shape::Rect });
+        let ty = y + (h - size * LINE_H) * 0.5;
+        ui.labels.push(Label { x: x0, y: y + (h - 18.0 * s * LINE_H) * 0.5, w: h, size: 18.0 * s, color: path_red(255), align: Align::Center, wrap: false, text: "←".into() });
+        self.bar_hits.push(([x0, y, x0 + h, y + h], BAR_BACK));
+        let mut x = x0 + h;
+        let last = items.len().saturating_sub(1);
+        for (i, (k, text, tw)) in items.into_iter().enumerate() {
+            let color = if i == last { path_red(255) } else { ink };
+            ui.labels.push(Label { x, y: ty, w: tw + 2.0 * s, size, color, align: Align::Left, wrap: false, text });
+            if k >= 0 {
+                self.bar_hits.push(([x - sep_w * 0.5, y, x + tw + sep_w * 0.5, y + h], k));
+            }
+            x += tw;
+            if i != last {
+                ui.labels.push(Label { x, y: ty, w: sep_w, size, color: rgba(0, 0, 0, 90), align: Align::Left, wrap: false, text: sep.into() });
+                x += sep_w;
+            }
+        }
+        ui
+    }
+
+    /// A press on the path bar, if it is there.
+    fn bar_hit(&self) -> Option<i32> {
+        if !self.path_active() {
+            return None;
+        }
+        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        self.bar_hits.iter().find(|(b, _)| x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]).map(|h| h.1)
+    }
+
+    fn bar_press(&mut self, k: i32) {
+        if k == BAR_BACK {
+            self.path_exit();
+            return;
+        }
+        if let Some(t) = &mut self.trail {
+            t.back_to(&self.board, k as usize);
+        }
+        self.after_step();
     }
 
     // ------------------------------------------------------------ search
@@ -833,6 +1129,18 @@ impl Editor {
 
     pub fn undo(&mut self, redo: bool) {
         self.commit_text();
+        // In the walk Ctrl+Z first undoes edits made since the last step,
+        // then the step itself.
+        if !redo {
+            if let Some(t) = &mut self.trail {
+                if !t.leaving && self.undo_stack.len() <= t.marks.last().copied().unwrap_or(0) {
+                    if t.pop(&self.board) {
+                        self.after_step();
+                    }
+                    return;
+                }
+            }
+        }
         let Some(c) = (if redo { self.redo_stack.pop() } else { self.undo_stack.pop() }) else { return };
         self.board.apply(&c, redo);
         let mut done = c.clone();
@@ -874,13 +1182,27 @@ impl Editor {
             }
         }
         self.commit_text();
+        if let Some(k) = self.bar_hit() {
+            self.bar_press(k);
+            self.mode = Mode::Idle;
+            return;
+        }
         // Hover is not tracked while typing: find what is under the pointer now.
         self.update_hover();
         if self.frozen {
             self.mode = Mode::Pan { moved: true, at: self.cursor };
             return;
         }
-        let hit = self.hit();
+        let mut hit = self.hit();
+        // In the walk the dimmed board is background: pressing it pans.
+        if let Some(t) = self.trail.as_ref().filter(|t| !t.leaving) {
+            let bright = t.bright(&self.board);
+            hit = match hit {
+                Hit::Node(id) | Hit::Inside(id) if !bright.contains(&id) => Hit::Empty,
+                Hit::Edge(e) if self.board.edge(&e).is_some_and(|e| !(bright.contains(&e.from) && bright.contains(&e.to))) => Hit::Empty,
+                h => h,
+            };
+        }
         let at = self.cursor;
         if double {
             match hit {
@@ -988,7 +1310,7 @@ impl Editor {
                 true
             }
             // Pointers report faster than frames: the work waits for the frame.
-            Mode::Move { .. } | Mode::Resize { .. } => {
+            Mode::Move { .. } | Mode::Resize { .. } | Mode::PathDrag { .. } => {
                 self.drag_pending = true;
                 true
             }
@@ -998,6 +1320,18 @@ impl Editor {
     }
 
     fn start_move(&mut self, at: Pos) {
+        // In the walk a drag only moves where the concept is drawn.
+        if let Some(t) = self.trail.as_ref().filter(|t| !t.leaving) {
+            let Some(id) = self.sel.last().cloned() else {
+                self.mode = Mode::Idle;
+                return;
+            };
+            let base = t.own(&id).unwrap_or_else(|| t.target_of(&self.board, &id));
+            let start = self.engine.screen_to_world(at.x, at.y);
+            self.mode = Mode::PathDrag { id, start, base };
+            self.drag_pending = true;
+            return;
+        }
         // Move the selected concepts whose ancestors are not selected too.
         let sel: HashSet<String> = self.sel.iter().cloned().collect();
         let roots: Vec<String> = self.sel.iter().filter(|id| !self.board.ancestors(id).iter().any(|a| sel.contains(a))).cloned().collect();
@@ -1023,6 +1357,17 @@ impl Editor {
         self.mode = Mode::Move { start, roots, base: self.board.clone(), target: None, guides: Vec::new() };
         self.hide(nodes, edges);
         self.drag_move();
+    }
+
+    fn drag_path(&mut self) {
+        let w = self.engine.screen_to_world(self.cursor.x, self.cursor.y);
+        let Mode::PathDrag { id, start, base } = &self.mode else { return };
+        let o = (base.0 + (w.0 - start.0) as f32, base.1 + (w.1 - start.1) as f32);
+        let id = id.clone();
+        if let Some(t) = &mut self.trail {
+            t.drag(&id, o);
+        }
+        self.rebuild_moving();
     }
 
     fn drag_move(&mut self) {
@@ -1214,6 +1559,12 @@ impl Editor {
     /// way (not an ancestor of its ends) comes near its route; the release
     /// does a full rebuild.
     fn rebuild_live(&mut self, moved: &[(String, Bbox, Bbox)]) {
+        // The walk draws a copy of the board: rebuild that whole (boards
+        // walked by hand are small).
+        if self.trail.is_some() {
+            self.rebuild();
+            return;
+        }
         let touch = |a: &Bbox, b: &Bbox, m: f32| a[0] <= b[2] + m && a[2] >= b[0] - m && a[1] <= b[3] + m && a[3] >= b[1] - m;
         let ends: HashSet<&str> = moved.iter().map(|m| m.0.as_str()).collect();
         let board = &self.board;
@@ -1237,7 +1588,7 @@ impl Editor {
         self.raw_routes = route::raw_routes(&self.board, self.show_nested_links, Some(&dirty), &self.raw_routes);
         self.routes = route::finish(&self.board, &self.raw_routes);
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
-        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges };
+        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges, bright: None };
         let scene = view::build(&self.board, &self.routes, &m, &skip, view::bg_color());
         self.engine.set_scene(scene);
     }
@@ -1245,7 +1596,37 @@ impl Editor {
     pub fn release(&mut self) {
         self.text_drag = false;
         self.flush_drag();
+        let walking = self.path_active();
         match std::mem::replace(&mut self.mode, Mode::Idle) {
+            // In the walk a tap on empty canvas folds untouched neighbours.
+            Mode::Pan { moved: false, .. } if walking => {
+                if let Some(t) = &mut self.trail {
+                    t.fold(&self.board);
+                }
+                if let Some(t) = &self.trail {
+                    self.sel = vec![t.current().to_string()];
+                }
+                self.sel_edge = None;
+            }
+            // A tap on a concept out: a step to it (on the current one:
+            // fold or unfold its neighbours).
+            Mode::Press { node: Some(id), double: false, .. } if walking && !self.shift => {
+                let undo_len = self.undo_stack.len();
+                if let Some(t) = &mut self.trail {
+                    if t.current() == id {
+                        t.toggle(&self.board);
+                    } else {
+                        t.step(&self.board, &id, undo_len);
+                    }
+                }
+                self.after_step();
+                return;
+            }
+            Mode::PathDrag { id, .. } => {
+                if let Some(t) = &mut self.trail {
+                    t.touch(&id);
+                }
+            }
             Mode::Pan { moved: false, .. } => {
                 self.sel.clear();
                 self.sel_edge = None;
@@ -1339,7 +1720,9 @@ impl Editor {
             return;
         }
         // Released on empty space: a new concept there, already connected.
-        let parent = self.board.deepest_at(p.0, p.1, &HashSet::new()).filter(|t| !self.board.is_ancestor(&from, t) && *t != from);
+        // In the walk the pointer is where things are drawn, not where they
+        // lie: the new concept stays top level (the walk lays it out).
+        let parent = if self.trail.is_some() { None } else { self.board.deepest_at(p.0, p.1, &HashSet::new()).filter(|t| !self.board.is_ancestor(&from, t) && *t != from) };
         self.begin();
         let id = self.place_new(p, parent.as_deref());
         if !self.board.is_ancestor(&id, &from) {
@@ -1394,10 +1777,14 @@ impl Editor {
         }
         let eng = &self.engine;
         let one = move |n: &Node| view::title_lines(n, &|t: &str, s: f32, w: f32| eng.wrapped_lines(t, s, w));
+        let walking = self.trail.is_some();
         let mut board = std::mem::take(&mut self.board);
         board.fit_ancestors(&id, &one);
-        board.resolve_overlap(&id);
-        board.fit_ancestors(&id, &one);
+        // In the walk `p` is where things are drawn: overlaps on the board there mean nothing.
+        if !walking {
+            board.resolve_overlap(&id);
+            board.fit_ancestors(&id, &one);
+        }
         self.board = board;
         id
     }
@@ -1430,9 +1817,13 @@ impl Editor {
 
     /// Double-click on empty canvas (or a parent's empty inside).
     fn create_at(&mut self, p: Pt, parent: Option<String>) {
-        let parent = parent.or_else(|| self.board.deepest_at(p.0, p.1, &HashSet::new()));
+        let walking = self.trail.is_some();
+        let parent = if walking { parent } else { parent.or_else(|| self.board.deepest_at(p.0, p.1, &HashSet::new())) };
         self.begin();
         let id = self.place_new(p, parent.as_deref());
+        if walking {
+            self.rebuild();
+        }
         self.sel = vec![id.clone()];
         self.sel_edge = None;
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
@@ -1820,6 +2211,7 @@ impl Editor {
             NODE_WRAP => self.wrap_selection(),
             NODE_DELETE => self.delete_selection(false),
             NODE_DELETE_DEEP => self.delete_selection(true),
+            NODE_PATH => self.path_enter(),
             CANVAS_NEW => {
                 let p = self.menu_at;
                 self.create_at(p, None);
@@ -1865,7 +2257,7 @@ impl Editor {
 
     /// Pans just enough to bring concept `id` into view.
     fn show(&mut self, id: &str) {
-        let Some(b) = self.board.get(id).map(|n| n.bbox()) else { return };
+        let Some(b) = self.shown().get(id).map(|n| n.bbox()) else { return };
         let v = self.engine.view_rect();
         let m = 24.0 * self.dp();
         let dx = if b[2] + m > v[2] { v[2] - b[2] - m } else if b[0] - m < v[0] { v[0] - b[0] + m } else { 0.0 };

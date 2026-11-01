@@ -24,7 +24,7 @@ fn main() {
         }
         println!("  route_between only {:?} ({n} pts)", t.elapsed());
         let t = Instant::now();
-        let skip = view::Skip { nodes: &Default::default(), edges: &Default::default() };
+        let skip = view::Skip { nodes: &Default::default(), edges: &Default::default(), bright: None };
         let s = view::build(&b2, &routes, &m, &skip, view::bg_color());
         let v = t.elapsed();
         println!("clone {:?}  route_all {:?}  view {:?}  rects {} labels {}", clone, r, v, s.rects.len(), s.labels.len());

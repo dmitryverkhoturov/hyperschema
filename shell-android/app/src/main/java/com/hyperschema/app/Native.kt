@@ -42,4 +42,6 @@ object Native {
     /** step: 0 new query, 1 next, -1 previous. Returns "current\tcount". */
     external fun search(h: Long, query: String, step: Int): String
     external fun searchClose(h: Long)
+    external fun setTop(h: Long, top: Float)
+    external fun pathExit(h: Long): Boolean
 }

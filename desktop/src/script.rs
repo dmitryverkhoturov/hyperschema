@@ -5,7 +5,7 @@
 //!
 //! move X Y | down [alt] [shift] | up | rdown | click X Y | dbl X Y
 //! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
-//! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group
+//! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group|path
 //! key left|right|up|down|home|end|del|selall|copy|cut|paste|dup|tab [shift] [ctrl]
 //! find TEXT|next|prev|close | wait MS | choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
 //! timeline open|seek N|restore|close | shot out.png | state | tree | quit
@@ -106,6 +106,8 @@ impl State {
                 "esc" => {
                     if self.editing_text() {
                         self.commit_text()
+                    } else if self.ed.path_active() {
+                        self.ed.path_exit()
                     } else {
                         self.ed.sel.clear()
                     }
@@ -117,6 +119,7 @@ impl State {
                 "undo" => self.undo(false),
                 "redo" => self.undo(true),
                 "save" => self.flush(),
+                "path" => self.ed.path_enter(),
                 "group" => self.wrap_selection(),
                 k @ ("left" | "right" | "up" | "down" | "home" | "end" | "del") => {
                     use hs_core::editor::TextKey;
@@ -256,7 +259,10 @@ cam {:.1} {:.1} {:.4} size {:?}
             self.editing_text(),
             self.ed.undo_stack.len(),
             self.unsaved.len()
-        )
+        ) + &self.ed.trail.as_ref().filter(|t| !t.leaving).map(|t| {
+            let names = |v: &[String]| v.iter().map(|id| self.label_of(id)).collect::<Vec<_>>().join(" > ");
+            format!(" path [{}] open {}", names(&t.links), t.open.len())
+        }).unwrap_or_default()
     }
 
     /// The nesting tree with boxes, then the visible connections.

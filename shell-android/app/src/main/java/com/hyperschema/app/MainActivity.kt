@@ -238,6 +238,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             val sys = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             topInset = sys.top
             bottomInset = sys.bottom
+            if (handle != 0L) Native.setTop(handle, sys.top + dp(60f))
             imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom
             val m = dp(10f).toInt()
             (left.layoutParams as FrameLayout.LayoutParams).setMargins(m + sys.left, m + sys.top, 0, 0)
@@ -298,6 +299,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         }
         val dbg = intent.getStringExtra("dbgfile")
         if (dbg != null) open(Uri.fromFile(java.io.File(filesDir, dbg))) else readIntent(intent)
+    }
+
+    @Deprecated("Back leaves the walk first")
+    override fun onBackPressed() {
+        if (handle != 0L && Native.pathExit(handle)) {
+            sync()
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
     }
 
     override fun onPause() {
@@ -532,6 +543,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         if (barKind != "sel") {
             bar.removeAllViews()
             bar.addView(barButton("Текст", false) { Native.editSelected(handle) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Путь", false) { Native.nodeChoice(handle, NODE_PATH) }, LinearLayout.LayoutParams(-2, -1))
             bar.addView(barButton("Цвет", false) { pickingColor = true }, LinearLayout.LayoutParams(-2, -1))
             bar.addView(plainButton("Форма") { shapeMenu(it) }, LinearLayout.LayoutParams(-2, -1))
             bar.addView(plainButton("Ещё") { moreMenu(it) }, LinearLayout.LayoutParams(-2, -1))
@@ -703,6 +715,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
                         creating = false
                         attached = hnd != 0L
                         if (hnd != 0L && nestedLinks()) Native.setNested(hnd, true)
+                        if (hnd != 0L) Native.setTop(hnd, topInset + dp(60f))
                         loadPending()
                         sync()
                     }
@@ -796,6 +809,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         const val NODE_WRAP = 32
         const val NODE_DELETE = 33
         const val NODE_DELETE_DEEP = 34
+        const val NODE_PATH = 35
         val PALETTE = intArrayOf(
             Color.WHITE, Color.parseColor("#e9ecef"), Color.parseColor("#ffc9c9"), Color.parseColor("#ffd8a8"),
             Color.parseColor("#fff3bf"), Color.parseColor("#b2f2bb"), Color.parseColor("#a5d8ff"), Color.parseColor("#d0bfff")
