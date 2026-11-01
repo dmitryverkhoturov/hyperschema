@@ -1,10 +1,16 @@
 //! Path mode: walking the board along its connections. Neighbours of the
-//! current concept slide out next to it, each on the side where it lies;
-//! a tap steps to one of them. The board itself never moves: the walk keeps
-//! an offset per concept moved out (its subtree follows) and the editor
-//! shows a copy of the board with the offsets applied.
+//! current concept slide out next to it; a tap steps to one of them. The
+//! board itself never moves: the walk keeps a pose per concept moved out
+//! (an offset, and in the flat layouts a size too) and the editor shows a
+//! copy of the board with the poses applied.
+//!
+//! Layouts: "Карта" keeps real sizes and nesting (a moved parent carries
+//! what it holds); the flat ones draw everything out at one scale, the
+//! first link's, with nesting as plain parent -> child arrows and a frame
+//! out as a compact card with its title only.
 
-use crate::board::{overlaps, Bbox, Board};
+use crate::board::{overlaps, Bbox, Board, Kind};
+use crate::text::LINE_H;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -12,6 +18,78 @@ pub type Off = (f32, f32);
 
 /// How long concepts take to slide out or back.
 pub const EASE_MS: f64 = 250.0;
+
+/// How neighbours are laid out around the current concept.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Layout {
+    /// Real sizes, each on the side where it lies on the board.
+    Map,
+    /// Own side, all at one scale.
+    #[default]
+    Near,
+    /// Incoming on the left, outgoing on the right, one scale.
+    Right,
+    /// Incoming above, outgoing below, one scale.
+    Down,
+}
+
+impl Layout {
+    pub fn next(self) -> Layout {
+        match self {
+            Layout::Map => Layout::Near,
+            Layout::Near => Layout::Right,
+            Layout::Right => Layout::Down,
+            Layout::Down => Layout::Map,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::Map => "Карта",
+            Layout::Near => "Рядом",
+            Layout::Right => "Дерево →",
+            Layout::Down => "Дерево ↓",
+        }
+    }
+
+    /// One scale, nesting drawn as arrows.
+    pub fn flat(self) -> bool {
+        self != Layout::Map
+    }
+}
+
+/// Where a concept is drawn, relative to the board: offset and size change.
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
+pub struct Pose {
+    pub dx: f32,
+    pub dy: f32,
+    pub dw: f32,
+    pub dh: f32,
+    pub df: f32,
+}
+
+impl Pose {
+    fn at(o: Off) -> Pose {
+        Pose { dx: o.0, dy: o.1, ..Pose::default() }
+    }
+
+    fn off(self) -> Off {
+        (self.dx, self.dy)
+    }
+
+    fn lerp(a: Pose, b: Pose, e: f32) -> Pose {
+        let l = |x: f32, y: f32| x + (y - x) * e;
+        Pose { dx: l(a.dx, b.dx), dy: l(a.dy, b.dy), dw: l(a.dw, b.dw), dh: l(a.dh, b.dh), df: l(a.df, b.df) }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 pub struct Trail {
     /// The path walked; the last one is the current concept.
@@ -26,11 +104,12 @@ pub struct Trail {
     pub expanded: bool,
     /// Moved by hand or created here: they stay out until the walk ends.
     pub touched: HashSet<String>,
-    /// Where concepts are going, as offsets from their place on the board.
-    off: HashMap<String, Off>,
-    /// Offsets drawn now, easing toward `off`.
-    shown: HashMap<String, Off>,
-    from: HashMap<String, Off>,
+    pub layout: Layout,
+    /// Where concepts are going, relative to their place on the board.
+    off: HashMap<String, Pose>,
+    /// Poses drawn now, easing toward `off`.
+    shown: HashMap<String, Pose>,
+    from: HashMap<String, Pose>,
     start: Option<Instant>,
     /// Concepts that existed at the last sync (new ones get adopted).
     known: HashSet<String>,
@@ -56,22 +135,72 @@ pub fn neighbors(b: &Board, id: &str) -> Vec<String> {
     v
 }
 
-fn shift(b: Bbox, o: Off) -> Bbox {
-    [b[0] + o.0, b[1] + o.1, b[2] + o.0, b[3] + o.1]
+/// Whether `n` continues the thought from `c`: a child, a connection whose
+/// head points at `n`, or one without heads. A parent or a connection
+/// pointing only at `c` comes before it.
+pub fn outgoing(b: &Board, c: &str, n: &str) -> bool {
+    let mut any = false;
+    for e in &b.edges {
+        if !((e.from == c && e.to == n) || (e.from == n && e.to == c)) {
+            continue;
+        }
+        any = true;
+        if e.kind == Kind::Contains {
+            if e.from == c {
+                return true;
+            }
+            continue;
+        }
+        let at_n = (e.to == n && e.arrow_to) || (e.from == n && e.arrow_from);
+        let at_c = (e.to == c && e.arrow_to) || (e.from == c && e.arrow_from);
+        if at_n || !at_c {
+            return true;
+        }
+    }
+    !any
 }
 
 fn grow(b: Bbox, d: f32) -> Bbox {
     [b[0] - d, b[1] - d, b[2] + d, b[3] + d]
 }
 
+/// A free spot for a `w`x`h` box beside `cb`, along the ray at angle
+/// `base` (turning a little and stepping further out when it is taken).
+fn spot(cb: Bbox, w: f32, h: f32, base: f32, gap: f32, taken: &[Bbox]) -> Bbox {
+    let (cw, ch) = (cb[2] - cb[0], cb[3] - cb[1]);
+    let step = w.max(h) * 0.6 + gap;
+    let cc = ((cb[0] + cb[2]) * 0.5, (cb[1] + cb[3]) * 0.5);
+    let mut best = None;
+    for ring in 0..14 {
+        for da in [0.0f32, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9, 1.2, -1.2] {
+            let a = base + da;
+            let (dx, dy) = (a.cos(), a.sin());
+            // Distance along the ray where the two boxes stop overlapping.
+            let ex = (cw + w) * 0.5 + gap;
+            let ey = (ch + h) * 0.5 + gap;
+            let t = (if dx.abs() > 1e-4 { ex / dx.abs() } else { f32::MAX }).min(if dy.abs() > 1e-4 { ey / dy.abs() } else { f32::MAX }) + ring as f32 * step;
+            let (x, y) = (cc.0 + dx * t - w * 0.5, cc.1 + dy * t - h * 0.5);
+            let cand = [x, y, x + w, y + h];
+            if best.is_none() {
+                best = Some(cand);
+            }
+            if !taken.iter().any(|o| overlaps(o, &grow(cand, gap * 0.4))) && !overlaps(&cb, &grow(cand, gap * 0.4)) {
+                return cand;
+            }
+        }
+    }
+    best.unwrap_or(cb)
+}
+
 impl Trail {
-    pub fn new(b: &Board, links: Vec<String>, undo_len: usize) -> Trail {
+    pub fn new(b: &Board, links: Vec<String>, undo_len: usize, layout: Layout) -> Trail {
         let mut t = Trail {
             marks: vec![undo_len; links.len()],
             links,
             open: Vec::new(),
             expanded: true,
             touched: HashSet::new(),
+            layout,
             off: HashMap::new(),
             shown: HashMap::new(),
             from: HashMap::new(),
@@ -79,15 +208,8 @@ impl Trail {
             known: b.nodes.iter().map(|n| n.id.clone()).collect(),
             leaving: false,
         };
-        // A remembered path: its links come back where they were laid out,
-        // each beside the one before it.
-        for i in 1..t.links.len() {
-            let (c, n) = (t.links[i - 1].clone(), t.links[i].clone());
-            let taken = t.taken(b, &n);
-            t.place(b, &c, &n, &taken);
-        }
         t.reopen(b);
-        t.settle(b);
+        t.relayout(b);
         t
     }
 
@@ -103,10 +225,13 @@ impl Trail {
         s
     }
 
-    /// What is drawn bright: what is out and everything nested in it. A
-    /// frame around the walk (the current concept's parent) lights up
-    /// alone, not with all it holds.
+    /// What is drawn bright: what is out and, on the map, everything
+    /// nested in it. There a frame around the walk (the current concept's
+    /// parent) lights up alone, not with all it holds.
     pub fn bright(&self, b: &Board) -> HashSet<String> {
+        if self.layout.flat() {
+            return self.out().into_iter().filter(|id| b.get(id).is_some()).collect();
+        }
         let mut s = HashSet::new();
         let walk: Vec<&String> = self.links.iter().chain(self.touched.iter()).collect();
         for id in self.out() {
@@ -128,31 +253,64 @@ impl Trail {
         neighbors(b, id).iter().filter(|n| !out.contains(*n)).count()
     }
 
-    /// Offset of `id` where it is going: its own or its nearest moved ancestor's.
+    /// Pose of `id` in `m`: its own or, on the map, its nearest moved
+    /// ancestor's offset (what it holds moves along, at its size).
+    fn pose_in(&self, m: &HashMap<String, Pose>, b: &Board, id: &str) -> Pose {
+        if let Some(p) = m.get(id) {
+            return *p;
+        }
+        if self.layout.flat() {
+            return Pose::default();
+        }
+        b.ancestors(id).iter().find_map(|a| m.get(a).map(|p| Pose::at(p.off()))).unwrap_or_default()
+    }
+
+    /// Offset of `id` where it is going.
     pub fn target_of(&self, b: &Board, id: &str) -> Off {
-        if let Some(o) = self.off.get(id) {
-            return *o;
-        }
-        b.ancestors(id).iter().find_map(|a| self.off.get(a).copied()).unwrap_or((0.0, 0.0))
+        self.pose_in(&self.off, b, id).off()
     }
 
-    fn shown_of(&self, b: &Board, id: &str) -> Off {
-        if let Some(o) = self.shown.get(id) {
-            return *o;
-        }
-        b.ancestors(id).iter().find_map(|a| self.shown.get(a).copied()).unwrap_or((0.0, 0.0))
+    /// Box of `id` where it is going.
+    pub fn target_box(&self, b: &Board, id: &str) -> Option<Bbox> {
+        let n = b.get(id)?;
+        let p = self.pose_in(&self.off, b, id);
+        Some([n.x + p.dx, n.y + p.dy, n.x + p.dx + n.w + p.dw, n.y + p.dy + n.h + p.dh])
     }
 
-    /// The board as drawn: every concept at its offset.
+    /// The board as drawn: every concept at its pose. In the flat layouts
+    /// nesting that touches something out is undone (it is out on its
+    /// own): between two out concepts it becomes a parent -> child arrow.
     pub fn display(&self, b: &Board) -> Board {
         let mut d = b.clone();
+        if self.layout.flat() && !self.leaving {
+            let out = self.out();
+            let mut changed = false;
+            d.edges.retain_mut(|e| {
+                if e.kind != Kind::Contains || !(out.contains(&e.from) || out.contains(&e.to)) {
+                    return true;
+                }
+                changed = true;
+                if out.contains(&e.from) && out.contains(&e.to) {
+                    e.kind = Kind::Link;
+                    (e.arrow_from, e.arrow_to) = (false, true);
+                    return true;
+                }
+                false
+            });
+            if changed {
+                d.reindex();
+            }
+        }
         if self.shown.is_empty() {
             return d;
         }
-        let offs: Vec<Off> = d.nodes.iter().map(|n| self.shown_of(b, &n.id)).collect();
-        for (n, o) in d.nodes.iter_mut().zip(offs) {
-            n.x += o.0;
-            n.y += o.1;
+        let poses: Vec<Pose> = d.nodes.iter().map(|n| self.pose_in(&self.shown, b, &n.id)).collect();
+        for (n, p) in d.nodes.iter_mut().zip(poses) {
+            n.x += p.dx;
+            n.y += p.dy;
+            n.w += p.dw;
+            n.h += p.dh;
+            n.font += p.df;
         }
         d
     }
@@ -163,22 +321,85 @@ impl Trail {
         self.shown.keys().chain(self.from.keys()).cloned().collect()
     }
 
-    /// Where the other out concepts are going (what a new one must avoid);
-    /// frames around the walk do not count, it lies inside them anyway.
-    fn taken(&self, b: &Board, except: &str) -> Vec<Bbox> {
+    /// Where the other out concepts are going (what new ones must avoid);
+    /// on the map frames around the walk do not count, it lies inside them.
+    fn taken(&self, b: &Board, except: &[String]) -> Vec<Bbox> {
         let walk: Vec<&String> = self.links.iter().chain(self.touched.iter()).collect();
+        let flat = self.layout.flat();
         self.out()
             .iter()
-            .filter(|id| id.as_str() != except && !walk.iter().any(|w| b.is_ancestor(id, w)) && !b.is_ancestor(id, except))
-            .filter_map(|id| b.get(id).map(|n| shift(n.bbox(), self.target_of(b, id))))
+            .filter(|id| !except.contains(id))
+            .filter(|id| flat || (!walk.iter().any(|w| b.is_ancestor(id, w)) && !except.iter().any(|x| b.is_ancestor(id, x))))
+            .filter_map(|id| self.target_box(b, id))
             .collect()
     }
 
-    /// Lays `n` out beside `c`, on the side where it lies on the board.
-    /// Nesting relatives stay put (the child is inside, the parent around),
-    /// and so does a concept holding something else that is out.
+    /// Scale of the flat layouts: the first link's font.
+    fn unit(&self, b: &Board) -> f32 {
+        self.links.first().and_then(|l| b.get(l)).map_or(20.0, |n| n.font)
+    }
+
+    /// Size of `id` drawn at font `f`: the concept scaled, a frame as a
+    /// compact card with its title (what it holds stays in it).
+    fn card(&self, b: &Board, id: &str, f: f32) -> (f32, f32) {
+        let n = b.node(id);
+        let k = f / n.font.max(1e-3);
+        if !b.has_children(id) {
+            return (n.w * k, n.h * k);
+        }
+        let w = (n.w * k).clamp(6.0 * f, 14.0 * f);
+        // Roughly half an em per character is close enough for the card.
+        let inner = w - f;
+        let lines: f32 = n.text.split('\n').map(|l| (l.chars().count() as f32 * 0.56 * f / inner).ceil().max(1.0)).sum::<f32>().max(1.0);
+        (w, lines * LINE_H * f + 1.2 * f)
+    }
+
+    /// Puts `id`'s card with its top left at (`x`, `y`).
+    #[allow(clippy::too_many_arguments)]
+    fn put(&mut self, b: &Board, id: &str, x: f32, y: f32, w: f32, h: f32, f: f32) {
+        let n = b.node(id);
+        self.off.insert(id.to_string(), Pose { dx: x - n.x, dy: y - n.y, dw: w - n.w, dh: h - n.h, df: f - n.font });
+    }
+
+    /// Lays out `ids` (neighbours of `c` not laid out yet) by the layout.
+    fn lay(&mut self, b: &Board, c: &str, ids: &[String]) {
+        match self.layout {
+            Layout::Map | Layout::Near => {
+                for n in ids {
+                    let taken = self.taken(b, std::slice::from_ref(n));
+                    self.place(b, c, n, &taken);
+                }
+            }
+            Layout::Right | Layout::Down => {
+                let (outs, ins): (Vec<String>, Vec<String>) = ids.iter().cloned().partition(|n| outgoing(b, c, n));
+                let (back, fwd) = if self.layout == Layout::Right { (Side::Left, Side::Right) } else { (Side::Up, Side::Down) };
+                let taken = self.taken(b, ids);
+                self.column(b, c, &ins, back, &taken);
+                let taken = self.taken(b, &outs);
+                self.column(b, c, &outs, fwd, &taken);
+            }
+        }
+    }
+
+    /// Lays `n` out beside `c`, on the side where it lies on the board. On
+    /// the map nesting relatives stay put (the child is inside, the parent
+    /// around), and so does a concept holding something else that is out.
     fn place(&mut self, b: &Board, c: &str, n: &str, taken: &[Bbox]) {
         let (Some(cn), Some(nn)) = (b.get(c), b.get(n)) else { return };
+        let Some(cb) = self.target_box(b, c) else { return };
+        let (hx, hy) = (nn.center().0 - cn.center().0, nn.center().1 - cn.center().1);
+        let mut base = if hx.hypot(hy) < 1e-3 { 0.0 } else { hy.atan2(hx) };
+        if self.layout.flat() {
+            // A parent comes out above: its centre says little about a side.
+            if b.is_ancestor(n, c) {
+                base = -std::f32::consts::FRAC_PI_2;
+            }
+            let f = self.unit(b);
+            let (w, h) = self.card(b, n, f);
+            let s = spot(cb, w, h, base, f * 2.0, taken);
+            self.put(b, n, s[0], s[1], w, h, f);
+            return;
+        }
         if b.is_ancestor(c, n) || b.is_ancestor(n, c) {
             return;
         }
@@ -186,37 +407,69 @@ impl Trail {
         if holds_out {
             return;
         }
-        let cb = shift(cn.bbox(), self.target_of(b, c));
         let nb = nn.bbox();
-        let (nw, nh) = (nb[2] - nb[0], nb[3] - nb[1]);
-        let (cw, ch) = (cb[2] - cb[0], cb[3] - cb[1]);
-        let gap = cn.font.max(nn.font) * 2.0;
-        let (hx, hy) = (nn.center().0 - cn.center().0, nn.center().1 - cn.center().1);
-        let base = if hx.hypot(hy) < 1e-3 { 0.0 } else { hy.atan2(hx) };
-        let step = nw.max(nh) * 0.6 + gap;
-        let cc = ((cb[0] + cb[2]) * 0.5, (cb[1] + cb[3]) * 0.5);
-        let mut best = None;
-        'search: for ring in 0..14 {
-            for da in [0.0f32, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9, 1.2, -1.2] {
-                let a = base + da;
-                let (dx, dy) = (a.cos(), a.sin());
-                // Distance along the ray where the two boxes stop overlapping.
-                let ex = (cw + nw) * 0.5 + gap;
-                let ey = (ch + nh) * 0.5 + gap;
-                let t = (if dx.abs() > 1e-4 { ex / dx.abs() } else { f32::MAX }).min(if dy.abs() > 1e-4 { ey / dy.abs() } else { f32::MAX }) + ring as f32 * step;
-                let (x, y) = (cc.0 + dx * t - nw * 0.5, cc.1 + dy * t - nh * 0.5);
-                let cand = [x, y, x + nw, y + nh];
-                if best.is_none() {
-                    best = Some(cand);
-                }
-                if !taken.iter().any(|o| overlaps(o, &grow(cand, gap * 0.4))) && !overlaps(&cb, &grow(cand, gap * 0.4)) {
-                    best = Some(cand);
-                    break 'search;
-                }
-            }
+        let s = spot(cb, nb[2] - nb[0], nb[3] - nb[1], base, cn.font.max(nn.font) * 2.0, taken);
+        self.off.insert(n.to_string(), Pose::at((s[0] - nb[0], s[1] - nb[1])));
+    }
+
+    /// Trees: `ids` in a column on `side` of `c`, in the order they lie on
+    /// the board; more than ten wrap into further columns. If that runs
+    /// into something out, the whole group moves further out.
+    fn column(&mut self, b: &Board, c: &str, ids: &[String], side: Side, taken: &[Bbox]) {
+        let Some(cb) = self.target_box(b, c) else { return };
+        if ids.is_empty() {
+            return;
         }
-        if let Some(c) = best {
-            self.off.insert(n.to_string(), (c[0] - nb[0], c[1] - nb[1]));
+        let f = self.unit(b);
+        let across = matches!(side, Side::Left | Side::Right);
+        let mut cards: Vec<(String, f32, f32, f32)> = ids
+            .iter()
+            .filter_map(|id| {
+                let n = b.get(id)?;
+                let (w, h) = self.card(b, id, f);
+                Some((id.clone(), w, h, if across { n.center().1 } else { n.center().0 }))
+            })
+            .collect();
+        cards.sort_by(|a, b| a.3.total_cmp(&b.3));
+        let (gap, main) = (f * 1.0, f * 4.0);
+        // Each card as (out from the edge, along it, size out, size along).
+        let mut boxes: Vec<(String, f32, f32, f32, f32)> = Vec::new();
+        let mut depth = 0.0;
+        for chunk in cards.chunks(10) {
+            let len: f32 = chunk.iter().map(|c| if across { c.2 } else { c.1 }).sum::<f32>() + gap * (chunk.len() - 1) as f32;
+            let thick = chunk.iter().map(|c| if across { c.1 } else { c.2 }).fold(0.0f32, f32::max);
+            let mut along = -len * 0.5;
+            for (id, w, h, _) in chunk {
+                let (sd, sa) = if across { (*w, *h) } else { (*h, *w) };
+                boxes.push((id.clone(), depth, along, sd, sa));
+                along += sa + gap;
+            }
+            depth += thick + main * 0.6;
+        }
+        let cc = ((cb[0] + cb[2]) * 0.5, (cb[1] + cb[3]) * 0.5);
+        let world = |push: f32, d: f32, a: f32, sd: f32, sa: f32| -> Bbox {
+            let d = main + push + d;
+            match side {
+                Side::Right => [cb[2] + d, cc.1 + a, cb[2] + d + sd, cc.1 + a + sa],
+                Side::Left => [cb[0] - d - sd, cc.1 + a, cb[0] - d, cc.1 + a + sa],
+                Side::Down => [cc.0 + a, cb[3] + d, cc.0 + a + sa, cb[3] + d + sd],
+                Side::Up => [cc.0 + a, cb[1] - d - sd, cc.0 + a + sa, cb[1] - d],
+            }
+        };
+        let mut push = 0.0;
+        for _ in 0..10 {
+            let clear = boxes.iter().all(|(_, d, a, sd, sa)| {
+                let r = world(push, *d, *a, *sd, *sa);
+                !taken.iter().any(|o| overlaps(o, &grow(r, gap * 0.4)))
+            });
+            if clear {
+                break;
+            }
+            push += depth;
+        }
+        for (id, d, a, sd, sa) in boxes {
+            let r = world(push, d, a, sd, sa);
+            self.put(b, &id, r[0], r[1], r[2] - r[0], r[3] - r[1], f);
         }
     }
 
@@ -227,15 +480,59 @@ impl Trail {
         self.expanded = true;
     }
 
+    /// Lays everything out again (a new walk, another layout): the path
+    /// link by link, each beside the one before it, then the neighbours.
+    /// Concepts dragged by hand keep their place.
+    fn relayout(&mut self, b: &Board) {
+        let kept: Vec<(String, Off)> = self.touched.iter().filter_map(|id| self.off.get(id).map(|p| (id.clone(), p.off()))).collect();
+        self.off.clear();
+        for (id, o) in kept {
+            self.off.insert(id, Pose::at(o));
+        }
+        if self.layout.flat() {
+            // The first link takes its card size before anything goes beside it.
+            if let Some(first) = self.links.first().cloned() {
+                self.fit(b, &first);
+            }
+        }
+        for i in 1..self.links.len() {
+            let (c, n) = (self.links[i - 1].clone(), self.links[i].clone());
+            if !self.touched.contains(&n) {
+                self.lay(b, &c, &[n]);
+            }
+        }
+        self.settle(b);
+    }
+
+    /// Flat layouts: `id` at the walk's scale. Without a place yet (the
+    /// first link) it keeps its centre.
+    fn fit(&mut self, b: &Board, id: &str) {
+        let Some(n) = b.get(id) else { return };
+        let f = self.unit(b);
+        let (w, h) = self.card(b, id, f);
+        let p = self.off.entry(id.to_string()).or_insert_with(|| Pose { dx: (n.w - w) * 0.5, dy: (n.h - h) * 0.5, ..Pose::default() });
+        (p.dw, p.dh, p.df) = (w - n.w, h - n.h, f - n.font);
+    }
+
+    /// Another layout: everything moves over to it.
+    pub fn set_layout(&mut self, b: &Board, l: Layout) {
+        if self.layout == l {
+            return;
+        }
+        self.layout = l;
+        self.relayout(b);
+    }
+
     /// Lays out what is newly out, sends back what is not, starts easing.
     fn settle(&mut self, b: &Board) {
         let out = self.out();
         self.off.retain(|id, _| out.contains(id));
         let cur = self.current().to_string();
-        for n in self.open.clone() {
-            if !self.off.contains_key(&n) {
-                let taken = self.taken(b, &n);
-                self.place(b, &cur, &n, &taken);
+        let fresh: Vec<String> = self.open.iter().filter(|n| !self.off.contains_key(*n)).cloned().collect();
+        self.lay(b, &cur, &fresh);
+        if self.layout.flat() {
+            for id in out {
+                self.fit(b, &id);
             }
         }
         self.ease();
@@ -244,8 +541,8 @@ impl Trail {
     fn ease(&mut self) {
         let mut from = HashMap::new();
         for id in self.shown.keys().chain(self.off.keys()) {
-            let s = self.shown.get(id).copied().unwrap_or((0.0, 0.0));
-            if self.off.get(id).copied().unwrap_or((0.0, 0.0)) != s {
+            let s = self.shown.get(id).copied().unwrap_or_default();
+            if self.off.get(id).copied().unwrap_or_default() != s {
                 from.insert(id.clone(), s);
             }
         }
@@ -257,19 +554,19 @@ impl Trail {
             self.from.insert(id, s);
         }
         for id in self.off.keys() {
-            self.shown.entry(id.clone()).or_insert((0.0, 0.0));
+            self.shown.entry(id.clone()).or_default();
         }
         self.start = Some(Instant::now());
     }
 
-    /// Moves the drawn offsets along; true while something slides.
+    /// Moves the drawn poses along; true while something slides.
     pub fn tick(&mut self) -> bool {
         let Some(start) = self.start else { return false };
         let t = (start.elapsed().as_secs_f64() * 1000.0 / EASE_MS).min(1.0) as f32;
         let e = 1.0 - (1.0 - t).powi(3);
         for (id, f) in &self.from {
-            let to = self.off.get(id).copied().unwrap_or((0.0, 0.0));
-            self.shown.insert(id.clone(), (f.0 + (to.0 - f.0) * e, f.1 + (to.1 - f.1) * e));
+            let to = self.off.get(id).copied().unwrap_or_default();
+            self.shown.insert(id.clone(), Pose::lerp(*f, to, e));
         }
         if t >= 1.0 {
             self.from.clear();
@@ -306,8 +603,7 @@ impl Trail {
         // out beside the current one first.
         if !self.out().contains(n) {
             let cur = self.current().to_string();
-            let taken = self.taken(b, n);
-            self.place(b, &cur, n, &taken);
+            self.lay(b, &cur, &[n.to_string()]);
         }
         self.links.push(n.to_string());
         self.marks.push(undo_len);
@@ -367,8 +663,10 @@ impl Trail {
 
     /// Dragging `id` by hand: it goes exactly where it is put.
     pub fn drag(&mut self, id: &str, o: Off) {
-        self.off.insert(id.to_string(), o);
-        self.shown.insert(id.to_string(), o);
+        let p = self.off.entry(id.to_string()).or_default();
+        (p.dx, p.dy) = o;
+        let p = *p;
+        self.shown.insert(id.to_string(), p);
         self.from.remove(id);
     }
 
@@ -382,7 +680,7 @@ impl Trail {
 
     /// Own offset of `id`, if it was moved out itself.
     pub fn own(&self, id: &str) -> Option<Off> {
-        self.off.get(id).copied()
+        self.off.get(id).map(|p| p.off())
     }
 
     /// Catches up with edits: deleted concepts leave the walk, new ones
@@ -410,8 +708,8 @@ impl Trail {
             let (hc, dc) = (c.center(), (c.center().0 + co.0, c.center().1 + co.1));
             for id in fresh {
                 let n = b.node(&id);
-                // Nested in something already out: it follows its parent.
-                if b.ancestors(&id).iter().any(|a| self.off.contains_key(a) || self.links.contains(a)) {
+                // On the map, nested in something already out: it follows its parent.
+                if !self.layout.flat() && b.ancestors(&id).iter().any(|a| self.off.contains_key(a) || self.links.contains(a)) {
                     self.touched.insert(id);
                     continue;
                 }
@@ -425,8 +723,8 @@ impl Trail {
                 if d_disp < d_home && (co.0 != 0.0 || co.1 != 0.0) {
                     moves.push((id.clone(), (-co.0, -co.1)));
                 }
-                self.off.insert(id.clone(), co);
-                self.shown.insert(id.clone(), co);
+                self.off.insert(id.clone(), Pose::at(co));
+                self.shown.insert(id.clone(), Pose::at(co));
                 self.touched.insert(id);
             }
         }
@@ -486,7 +784,7 @@ mod tests {
     #[test]
     fn neighbours_slide_out_on_their_own_side() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         settle_all(&mut t);
         let mut open = t.open.clone();
         open.sort();
@@ -503,7 +801,7 @@ mod tests {
     fn board_never_moves() {
         let b = board();
         let before = b.serialize();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         t.step(&b, "b", 0);
         t.step(&b, "e", 0);
         settle_all(&mut t);
@@ -513,7 +811,7 @@ mod tests {
     #[test]
     fn step_moves_on_and_untouched_go_back() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         t.step(&b, "b", 0);
         settle_all(&mut t);
         assert_eq!(t.links, ["a", "b"]);
@@ -529,7 +827,7 @@ mod tests {
     #[test]
     fn dragged_stays_out_after_step() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         t.drag("d", (500.0, -2000.0));
         t.touch("d");
         t.step(&b, "b", 0);
@@ -540,7 +838,7 @@ mod tests {
     #[test]
     fn back_and_pop_shorten_the_path() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         t.step(&b, "b", 0);
         t.step(&b, "e", 0);
         assert!(t.pop(&b));
@@ -557,7 +855,7 @@ mod tests {
     #[test]
     fn fold_and_toggle() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         t.fold(&b);
         settle_all(&mut t);
         assert!(t.open.is_empty());
@@ -571,7 +869,7 @@ mod tests {
     #[test]
     fn deleted_leave_new_come_out_beside_current() {
         let mut b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         t.step(&b, "b", 0);
         settle_all(&mut t);
         let bo = t.target_of(&b, "b");
@@ -608,10 +906,122 @@ mod tests {
         b.add_node(node("x", 5000.0, 0.0));
         b.set_parent("a", Some("p"));
         b.add_edge("a", "x", Kind::Link);
-        let mut t = Trail::new(&b, vec!["a".into()], 0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
         settle_all(&mut t);
         assert!(t.open.contains(&"p".to_string()));
         assert_eq!(t.own("p"), None);
         assert!(t.own("x").is_some());
+    }
+
+    fn heads(b: &mut Board, from: &str, to: &str) {
+        let k = b.edge_between(from, to).unwrap();
+        b.edges[k].arrow_to = true;
+    }
+
+    #[test]
+    fn near_draws_all_at_one_scale_on_their_side() {
+        let mut b = board();
+        // b is three times bigger, text and all.
+        let n = b.get_mut("b").unwrap();
+        (n.w, n.h, n.font) = (300.0, 150.0, 60.0);
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Near);
+        settle_all(&mut t);
+        let d = t.display(&b);
+        let (na, nb) = (d.node("a"), d.node("b"));
+        assert_eq!((nb.w, nb.h, nb.font), (100.0, 50.0, 20.0));
+        assert_eq!((na.w, na.font), (100.0, 20.0));
+        assert!(nb.x > na.x + na.w && nb.x < 1000.0, "b right of a and close: {}", nb.x);
+        assert!(d.node("c").x < na.x, "c on its own side");
+        // The board keeps its sizes.
+        assert_eq!(b.node("b").w, 300.0);
+    }
+
+    #[test]
+    fn trees_put_incoming_before_and_outgoing_after() {
+        let mut b = board();
+        heads(&mut b, "c", "a"); // c -> a: comes before a
+        heads(&mut b, "a", "b"); // a -> b: after
+        // a - d without heads: after, as a continuation.
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Right);
+        settle_all(&mut t);
+        let d = t.display(&b);
+        let a = d.node("a").bbox();
+        assert!(d.node("c").bbox()[2] < a[0], "c left of a");
+        assert!(d.node("b").x > a[2] && d.node("d").x > a[2], "b and d right of a");
+        // Ordered as on the board: b (y 0) above d (y 3000).
+        assert!(d.node("b").y < d.node("d").y);
+        t.set_layout(&b, Layout::Down);
+        settle_all(&mut t);
+        let d = t.display(&b);
+        let a = d.node("a").bbox();
+        assert!(d.node("c").bbox()[3] < a[1], "c above a");
+        assert!(d.node("b").y > a[3] && d.node("d").y > a[3], "b and d below a");
+        assert!(d.node("b").x != d.node("d").x, "side by side");
+    }
+
+    /// p is a big frame holding x and y; a is linked to p and nested in q.
+    fn framed() -> Board {
+        let mut b = Board::new();
+        b.add_node(Node { w: 4000.0, h: 3000.0, font: 80.0, ..node("p", 5000.0, 0.0) });
+        b.add_node(node("x", 5500.0, 500.0));
+        b.add_node(node("y", 6500.0, 500.0));
+        b.set_parent("x", Some("p"));
+        b.set_parent("y", Some("p"));
+        b.add_node(Node { w: 1000.0, h: 1000.0, ..node("q", -500.0, -500.0) });
+        b.add_node(node("a", 0.0, 0.0));
+        b.set_parent("a", Some("q"));
+        b.add_edge("a", "p", Kind::Link);
+        b
+    }
+
+    #[test]
+    fn a_frame_comes_out_as_a_card_and_opens_when_stepped_into() {
+        let b = framed();
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Near);
+        settle_all(&mut t);
+        let d = t.display(&b);
+        let p = d.node("p");
+        assert_eq!(p.font, 20.0);
+        assert!(p.w <= 14.0 * 20.0 && p.h < 100.0, "compact card: {} x {}", p.w, p.h);
+        // What it holds stays home, dimmed, and is no longer inside it.
+        assert_eq!(d.node("x").x, 5500.0);
+        assert!(d.parent("x").is_none() && !t.bright(&b).contains("x"));
+        // The parent of a is out above it, nesting drawn as an arrow.
+        assert!(t.open.contains(&"q".to_string()));
+        assert!(d.node("q").bbox()[3] <= d.node("a").y);
+        let k = d.edge_between("q", "a").unwrap();
+        assert!(d.edges[k].kind == Kind::Link && d.edges[k].arrow_to && d.edges[k].from == "q");
+        // Into the frame: its children come out beside it.
+        t.step(&b, "p", 0);
+        settle_all(&mut t);
+        let mut open = t.open.clone();
+        open.sort();
+        assert_eq!(open, ["x", "y"]);
+        let d = t.display(&b);
+        assert!((d.node("x").x - 5500.0).abs() > 100.0, "x came out");
+        assert_eq!(d.node("x").font, 20.0);
+        assert!(d.edge_between("p", "x").is_some_and(|k| d.edges[k].kind == Kind::Link));
+    }
+
+    #[test]
+    fn layouts_cycle_without_touching_the_board() {
+        let b = framed();
+        let before = b.serialize();
+        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Near);
+        t.step(&b, "p", 0);
+        let mut l = t.layout;
+        for _ in 0..4 {
+            l = l.next();
+            t.set_layout(&b, l);
+            settle_all(&mut t);
+            assert_eq!(t.links, ["a", "p"]);
+        }
+        assert_eq!(l, Layout::Near);
+        // Back on the map nothing is resized.
+        t.set_layout(&b, Layout::Map);
+        settle_all(&mut t);
+        let d = t.display(&b);
+        assert_eq!(d.node("p").w, 4000.0);
+        assert_eq!(b.serialize(), before);
     }
 }

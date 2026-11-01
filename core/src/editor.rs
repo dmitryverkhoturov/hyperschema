@@ -10,7 +10,7 @@ use crate::board::{contains, Bbox, Board, Change, Kind, Node, Shape as NShape, S
 use crate::route::{self, midpoint, seg_dist, Pt};
 use crate::scene::{rgba, Align, Label, Line, Rect, Scene, Shape};
 use crate::text::LINE_H;
-use crate::trail::Trail;
+use crate::trail::{Layout, Trail};
 use crate::view::Look;
 use crate::{view, Engine};
 use serde_json::Map;
@@ -73,6 +73,7 @@ fn path_red(a: u8) -> u32 {
 
 /// What a tap on the path bar hits: back (leave the walk) or a link index.
 pub const BAR_BACK: i32 = -1;
+pub const BAR_LAYOUT: i32 = -3;
 
 /// Resize handle: which edges move (bit 0 left, 1 right, 2 top, 3 bottom).
 pub type Handle = u8;
@@ -199,6 +200,8 @@ pub struct Editor {
     display: Option<Board>,
     /// The last walk, so leaving by mistake loses nothing.
     last_trail: Vec<String>,
+    /// Layout of the walk, kept for the next one.
+    pub layout: Layout,
     /// Screen y where the path bar starts (under the shell's own strip).
     pub ui_top: f32,
     bar_hits: Vec<([f32; 4], i32)>,
@@ -242,6 +245,7 @@ impl Editor {
             trail: None,
             display: None,
             last_trail: Vec::new(),
+            layout: Layout::default(),
             ui_top: 0.0,
             bar_hits: Vec::new(),
         }
@@ -731,7 +735,7 @@ impl Editor {
             return;
         }
         let links = if self.last_trail.contains(&one) { self.last_trail.clone() } else { vec![one] };
-        self.trail = Some(Trail::new(&self.board, links, self.undo_stack.len()));
+        self.trail = Some(Trail::new(&self.board, links, self.undo_stack.len(), self.layout));
         self.after_step();
     }
 
@@ -748,6 +752,17 @@ impl Editor {
         self.rebuild();
     }
 
+    /// Switches the walk's layout (`None`: the next one); the next walk
+    /// starts in it too.
+    pub fn path_layout(&mut self, l: Option<Layout>) {
+        self.commit_text();
+        let Some(t) = self.trail.as_mut().filter(|t| !t.leaving) else { return };
+        let l = l.unwrap_or(t.layout.next());
+        t.set_layout(&self.board, l);
+        self.layout = l;
+        self.after_step();
+    }
+
     /// After the walk changed: the current concept selected, the camera
     /// takes in it and what came out.
     fn after_step(&mut self) {
@@ -758,9 +773,7 @@ impl Editor {
         let mut ids: Vec<String> = t.open.clone();
         ids.push(t.current().to_string());
         for id in &ids {
-            let Some(n) = self.board.get(id) else { continue };
-            let o = t.target_of(&self.board, id);
-            let nb = [n.x + o.0, n.y + o.1, n.x + n.w + o.0, n.y + n.h + o.1];
+            let Some(nb) = t.target_box(&self.board, id) else { continue };
             b = Some(b.map_or(nb, |a| [a[0].min(nb[0]), a[1].min(nb[1]), a[2].max(nb[2]), a[3].max(nb[3])]));
         }
         self.rebuild();
@@ -798,7 +811,9 @@ impl Editor {
         let sep = "  ›  ";
         let sep_w = self.engine.measure(sep, size).0;
         let pad = 12.0 * s;
-        let room = w as f32 - x0 * 2.0 - h - pad;
+        let mode = t.layout.name();
+        let mode_w = self.engine.measure(mode, size).0 + 2.0 * pad;
+        let room = w as f32 - x0 * 2.0 - h - mode_w - pad;
         // Links from the end while they fit; the rest fold into "…".
         let mut items: Vec<(i32, String, f32)> = Vec::new();
         let mut used = 0.0;
@@ -814,12 +829,17 @@ impl Editor {
             used += add;
             items.insert(0, (k as i32, n, nw));
         }
-        let total = h + items.iter().map(|i| i.2).sum::<f32>() + sep_w * (items.len().saturating_sub(1)) as f32 + pad;
+        let total = h + mode_w + items.iter().map(|i| i.2).sum::<f32>() + sep_w * (items.len().saturating_sub(1)) as f32 + pad;
         ui.rects.push(Rect { x: x0, y, w: total, h, fill: rgba(255, 255, 255, 245), stroke: rgba(0, 0, 0, 35), stroke_w: 1.0 * s, radius: 10.0 * s, shape: Shape::Rect });
         let ty = y + (h - size * LINE_H) * 0.5;
         ui.labels.push(Label { x: x0, y: y + (h - 18.0 * s * LINE_H) * 0.5, w: h, size: 18.0 * s, color: path_red(255), align: Align::Center, wrap: false, text: "←".into() });
         self.bar_hits.push(([x0, y, x0 + h, y + h], BAR_BACK));
-        let mut x = x0 + h;
+        // The layout switch: a tap goes to the next one.
+        let (mx, inset) = (x0 + h, 5.0 * s);
+        ui.rects.push(Rect { x: mx, y: y + inset, w: mode_w - pad * 0.5, h: h - 2.0 * inset, fill: rgba(0, 0, 0, 14), stroke: 0, stroke_w: 0.0, radius: 7.0 * s, shape: Shape::Rect });
+        ui.labels.push(Label { x: mx, y: ty, w: mode_w - pad * 0.5, size, color: ink, align: Align::Center, wrap: false, text: mode.into() });
+        self.bar_hits.push(([mx, y, mx + mode_w - pad * 0.5, y + h], BAR_LAYOUT));
+        let mut x = x0 + h + mode_w;
         let last = items.len().saturating_sub(1);
         for (i, (k, text, tw)) in items.into_iter().enumerate() {
             let color = if i == last { path_red(255) } else { ink };
@@ -848,6 +868,10 @@ impl Editor {
     fn bar_press(&mut self, k: i32) {
         if k == BAR_BACK {
             self.path_exit();
+            return;
+        }
+        if k == BAR_LAYOUT {
+            self.path_layout(None);
             return;
         }
         if let Some(t) = &mut self.trail {

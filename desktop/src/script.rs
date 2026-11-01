@@ -120,6 +120,7 @@ impl State {
                 "redo" => self.undo(true),
                 "save" => self.flush(),
                 "path" => self.ed.path_enter(),
+                "layout" => self.ed.path_layout(None),
                 "group" => self.wrap_selection(),
                 k @ ("left" | "right" | "up" | "down" | "home" | "end" | "del") => {
                     use hs_core::editor::TextKey;
@@ -261,7 +262,7 @@ cam {:.1} {:.1} {:.4} size {:?}
             self.unsaved.len()
         ) + &self.ed.trail.as_ref().filter(|t| !t.leaving).map(|t| {
             let names = |v: &[String]| v.iter().map(|id| self.label_of(id)).collect::<Vec<_>>().join(" > ");
-            format!(" path [{}] open {}", names(&t.links), t.open.len())
+            format!(" path [{}] open {} layout {:?}", names(&t.links), t.open.len(), t.layout)
         }).unwrap_or_default()
     }
 
