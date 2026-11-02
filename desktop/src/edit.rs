@@ -121,7 +121,8 @@ impl State {
         for c in std::mem::take(&mut self.ed.done) {
             self.record(c);
         }
-        if self.ed.next_arrows != self.arrows_saved {
+        // Test runs keep the user's remembered arrows.
+        if self.ed.next_arrows != self.arrows_saved && self.script.is_none() && crate::harness().is_none() {
             self.arrows_saved = self.ed.next_arrows;
             let (f, t) = self.arrows_saved;
             let _ = std::fs::write(crate::data_dir().join("arrows.txt"), format!("{}{}", f as u8, t as u8));

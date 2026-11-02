@@ -218,11 +218,14 @@ impl State {
         // A popup menu can swallow the button's release: a gesture still
         // running with no button down ends here instead of dragging the
         // concept along with the pointer.
-        if self.script.is_none() && harness().is_none() && !self.ed.touch && !matches!(self.ed.mode, Mode::Idle | Mode::Text { .. }) {
+        let gesture = !matches!(self.ed.mode, Mode::Idle | Mode::Text { .. });
+        if self.script.is_none() && harness().is_none() && !self.ed.touch && (gesture || self.ed.selecting_text()) {
             use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
             let held = unsafe { [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|k| GetAsyncKeyState(k.0 as i32) as u16 & 0x8000 != 0) };
-            if !held {
+            if !held && gesture {
                 self.release();
+            } else if !held {
+                self.ed.end_text_drag();
             }
         }
         if self.timeline.as_ref().is_some_and(|t| t.dragging) {
@@ -453,7 +456,8 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(sz) => {
                 st.ed.engine.resize(sz.width, sz.height);
                 chrome::set_metrics(st.window.scale_factor(), sz.width);
-                if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) {
+                // Full screen (F11) is not the window's own size: keep the last one.
+                if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) && st.window.fullscreen().is_none() {
                     if let Ok(p) = st.window.outer_position() {
                         let o = st.window.outer_size();
                         st.restore = Some((p.x, p.y, o.width, o.height));
@@ -462,7 +466,7 @@ impl ApplicationHandler for App {
                 st.window.request_redraw();
             }
             WindowEvent::Moved(p) => {
-                if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) {
+                if !chrome::maximized() && !st.window.is_minimized().unwrap_or(false) && st.window.fullscreen().is_none() {
                     let s = st.window.outer_size();
                     st.restore = Some((p.x, p.y, s.width, s.height));
                 }

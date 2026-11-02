@@ -190,6 +190,12 @@ pub struct Editor {
     menu_at: Pt,
     /// The button down is the right one (its click opens a menu).
     right_press: bool,
+    /// Where the button went down, and whether the pointer has left that
+    /// spot since: the edge scroll waits for a real drag.
+    press_at: Pos,
+    press_moved: bool,
+    /// When the edge scroll last moved the view (its speed is per second).
+    edge_at: Option<Instant>,
     pub search: Option<Search>,
     flight: Option<Flight>,
     pub undo_stack: Vec<Change>,
@@ -257,6 +263,9 @@ impl Editor {
             text_box: None,
             menu_at: (0.0, 0.0),
             right_press: false,
+            press_at: Pos { x: -1.0, y: -1.0 },
+            press_moved: false,
+            edge_at: None,
             search: None,
             flight: None,
             undo_stack: Vec::new(),
@@ -664,10 +673,10 @@ impl Editor {
     }
 
     /// How fast the view should scroll while something is dragged to the
-    /// window's edge (screen pixels per frame), if it should.
+    /// window's edge (screen pixels per second), if it should.
     fn edge_push(&self) -> Option<(f64, f64)> {
         let dragging = matches!(self.mode, Mode::Connect { .. } | Mode::EdgeEnd { moved: true, .. } | Mode::Move { .. } | Mode::Boxing { .. } | Mode::PathDrag { .. });
-        if !dragging || self.frozen {
+        if !dragging || self.frozen || !self.press_moved {
             return None;
         }
         let (w, h) = self.engine.size();
@@ -676,15 +685,21 @@ impl Editor {
         let push = |d: f64| if d < band { ((band - d) / band).min(1.5) } else { 0.0 };
         let top = self.ui_top as f64;
         let (vx, vy) = (push(c.x) - push(w as f64 - c.x), push(c.y - top) - push(h as f64 - c.y));
-        let speed = 12.0 * self.ui as f64;
+        let speed = 720.0 * self.ui as f64;
         (vx != 0.0 || vy != 0.0).then_some((vx * speed, vy * speed))
     }
 
     /// Scrolls the view while a connection, concept or box is dragged to
     /// the window's edge; what is dragged stays under the pointer.
     fn edge_pan(&mut self) {
-        let Some((dx, dy)) = self.edge_push() else { return };
-        self.engine.pan(dx, dy);
+        let Some((vx, vy)) = self.edge_push() else {
+            self.edge_at = None;
+            return;
+        };
+        let now = Instant::now();
+        let dt = self.edge_at.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f64().min(0.05));
+        self.edge_at = Some(now);
+        self.engine.pan(vx * dt, vy * dt);
         if matches!(self.mode, Mode::Move { .. } | Mode::PathDrag { .. }) {
             self.drag_pending = true;
         }
@@ -1116,12 +1131,15 @@ impl Editor {
             }
         }
         if let Some(eid) = &self.sel_edge {
-            if let Some(path) = self.routes.get(eid) {
+            if let (Some(path), Some(e)) = (self.routes.get(eid), board.edge(eid)) {
                 let near = |q: Pt| (q.0 - p.0).hypot(q.1 - p.1) < reach;
-                if near(path[0]) {
+                // An end sits on its concept's border: a press inside the
+                // concept is meant for the concept, not the arrowhead.
+                let off = |id: &str| board.get(id).is_none_or(|n| !inside(&n.bbox(), p, -tol * 0.5));
+                if near(path[0]) && off(&e.from) {
                     return Hit::EdgeEnd(eid.clone(), true);
                 }
-                if near(path[path.len() - 1]) {
+                if near(path[path.len() - 1]) && off(&e.to) {
                     return Hit::EdgeEnd(eid.clone(), false);
                 }
                 if near(midpoint(path)) {
@@ -1230,11 +1248,12 @@ impl Editor {
         let board = self.shown();
         let p = self.world();
         let tol = self.tol();
+        let front = self.front();
         let t = board
             .nodes
             .iter()
             .rev()
-            .find(|n| n.shape == NShape::Text && self.front().is_none_or(|f| f.contains(&n.id)) && inside(&n.bbox(), p, tol))
+            .find(|n| n.shape == NShape::Text && front.as_ref().is_none_or(|f| f.contains(&n.id)) && inside(&n.bbox(), p, tol))
             .map(|n| n.id.clone())
             .or_else(|| self.deepest(p))?;
         (t != from && !board.is_ancestor(&t, from) && !board.is_ancestor(from, &t)).then_some(t)
@@ -1325,6 +1344,7 @@ impl Editor {
     /// Left button / finger down. `double`: the second press of a double click.
     pub fn press(&mut self, alt: bool, shift: bool, double: bool) {
         self.right_press = false;
+        (self.press_at, self.press_moved) = (self.cursor, false);
         // On the text being edited a press moves the caret (a drag selects,
         // a double click selects a word). Fingers edit through the native
         // text field, which owns the caret there.
@@ -1360,16 +1380,8 @@ impl Editor {
             self.mode = Mode::Pan { moved: true, at: self.cursor };
             return;
         }
-        let mut hit = self.hit();
-        // In the walk the dimmed board is background: pressing it pans.
-        if let Some(t) = self.trail.as_ref().filter(|t| !t.leaving) {
-            let bright = t.bright(&self.board);
-            hit = match hit {
-                Hit::Node(id) | Hit::Inside(id) if !bright.contains(&id) => Hit::Empty,
-                Hit::Edge(e) if self.board.edge(&e).is_some_and(|e| !(bright.contains(&e.from) && bright.contains(&e.to))) => Hit::Empty,
-                h => h,
-            };
-        }
+        // In the walk `hit` skips the dimmed board: pressing it pans.
+        let hit = self.hit();
         let at = self.cursor;
         if double {
             if let Some((id, t)) = self.last_step.take() {
@@ -1440,11 +1452,22 @@ impl Editor {
     pub fn press_right(&mut self, shift: bool) {
         self.commit_text();
         self.right_press = true;
+        (self.press_at, self.press_moved) = (self.cursor, false);
         if self.frozen {
             return;
         }
         let w = self.engine.screen_to_world(self.cursor.x, self.cursor.y);
         self.mode = Mode::Boxing { from: w, add: shift };
+    }
+
+    /// The mouse is selecting text being edited.
+    pub fn selecting_text(&self) -> bool {
+        self.text_drag
+    }
+
+    /// Ends a text selection whose button release never arrived.
+    pub fn end_text_drag(&mut self) {
+        self.text_drag = false;
     }
 
     pub fn panning(&self) -> bool {
@@ -1453,6 +1476,9 @@ impl Editor {
 
     /// Pointer moved while a button is down. Returns true if it needs a redraw.
     pub fn drag_to(&mut self, prev: Pos) -> bool {
+        if (self.press_at.x - self.cursor.x).hypot(self.press_at.y - self.cursor.y) > 4.0 {
+            self.press_moved = true;
+        }
         if self.text_drag {
             if let Some(k) = self.slot_at_pointer(false) {
                 self.caret = k;
