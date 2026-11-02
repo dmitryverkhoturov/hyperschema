@@ -361,6 +361,37 @@ pub extern "system" fn Java_com_hyperschema_app_Native_serialize(mut env: JNIEnv
     out(&mut env, Some(s))
 }
 
+/// Recent walks of the open board, for the shell to keep (per device).
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_walks(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
+    let s = app(h).ed.walks_json();
+    out(&mut env, Some(s))
+}
+
+/// Walks kept by `walks`; the one going on when the app closed goes on.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setWalks(mut env: JNIEnv, _c: JClass, h: jlong, s: JString) {
+    let s = jstr(&mut env, &s);
+    let a = app(h);
+    a.ed.set_walks_json(&s);
+    a.settle();
+}
+
+/// Layout of walks (kept between runs by the shell).
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_layout(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
+    let s = app(h).ed.layout.key().to_string();
+    out(&mut env, Some(s))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setLayout(mut env: JNIEnv, _c: JClass, h: jlong, s: JString) {
+    let s = jstr(&mut env, &s);
+    if let Some(l) = hs_core::trail::Layout::from_key(&s) {
+        app(h).ed.layout = l;
+    }
+}
+
 /// The edited text changed in the shell's text field.
 #[no_mangle]
 pub extern "system" fn Java_com_hyperschema_app_Native_setText(mut env: JNIEnv, _c: JClass, h: jlong, text: JString) {

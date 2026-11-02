@@ -191,6 +191,10 @@ pub struct State {
     shown: bool,
     /// Last non-maximised position and size.
     restore: Option<(i32, i32, u32, u32)>,
+    /// The board's walks as last written (`walks/…json`).
+    walks_saved: String,
+    /// Layout of walks as last saved (`path-layout.txt`).
+    layout_saved: hs_core::trail::Layout,
     /// Arrowheads of the next connection as last saved (`arrows.txt`).
     arrows_saved: (bool, bool),
 }
@@ -311,6 +315,7 @@ impl State {
     fn quit(&mut self, el: &ActiveEventLoop) {
         self.commit_text();
         self.flush();
+        self.save_walks();
         if self.script.is_none() && self.auto.is_none() && harness().is_none() {
             save_placement(self);
         }
@@ -413,7 +418,13 @@ impl ApplicationHandler for App {
             shown: false,
             restore,
             arrows_saved: (false, true),
+            walks_saved: String::new(),
+            layout_saved: Default::default(),
         };
+        if let Some(l) = std::fs::read_to_string(data_dir().join("path-layout.txt")).ok().and_then(|s| hs_core::trail::Layout::from_key(&s)) {
+            st.ed.layout = l;
+            st.layout_saved = l;
+        }
         st.ed.show_nested_links = std::fs::read_to_string(data_dir().join("show-nested-links.txt")).is_ok_and(|s| s.trim() == "1");
         if let Ok(a) = std::fs::read_to_string(data_dir().join("arrows.txt")) {
             let b: Vec<bool> = a.trim().chars().map(|c| c == '1').collect();

@@ -59,6 +59,15 @@ pub const NODE_DELETE: i32 = 33;
 pub const NODE_DELETE_DEEP: i32 = 34;
 pub const NODE_PATH: i32 = 35;
 pub const NODE_CLOSE: i32 = 36;
+/// How many recent walks are remembered.
+const WALKS_KEPT: usize = 20;
+
+#[derive(Clone)]
+struct Walk {
+    links: Vec<String>,
+    kept: Vec<(String, crate::trail::Pose)>,
+}
+
 pub const CANVAS_NEW: i32 = 40;
 
 const BLUE: (u8, u8, u8) = (0x4a, 0x7d, 0xff);
@@ -207,8 +216,9 @@ pub struct Editor {
     /// Path mode: the walk, and the board as drawn with its offsets.
     pub trail: Option<Trail>,
     display: Option<Board>,
-    /// The last walk, so leaving by mistake loses nothing.
-    last_trail: Vec<String>,
+    /// Recent walks, newest first: entering on a concept of one brings it
+    /// back. Shells keep them on disk (`walks_json`).
+    walks: Vec<Walk>,
     /// Text being typed: earlier states (text, caret) for Ctrl+Z, and
     /// those undone for Ctrl+Y; typing is grouped into words and pauses.
     text_undo: Vec<(String, usize)>,
@@ -217,8 +227,6 @@ pub struct Editor {
     /// The last step taken by a tap, and when: the second tap of a double
     /// tap edits that concept even though the camera moved under it.
     last_step: Option<(String, Instant)>,
-    /// Concepts left out on the last walk, where they were.
-    last_kept: Vec<(String, crate::trail::Pose)>,
     /// Layout of the walk, kept for the next one.
     pub layout: Layout,
     /// Screen y where the path bar starts (under the shell's own strip).
@@ -275,8 +283,7 @@ impl Editor {
             request: None,
             trail: None,
             display: None,
-            last_trail: Vec::new(),
-            last_kept: Vec::new(),
+            walks: Vec::new(),
             last_step: None,
             text_undo: Vec::new(),
             text_redo: Vec::new(),
@@ -304,8 +311,7 @@ impl Editor {
         self.redo_stack.clear();
         self.step_base = None;
         self.trail = None;
-        self.last_trail.clear();
-        self.last_kept.clear();
+        self.walks.clear();
         self.rebuild();
     }
 
@@ -831,9 +837,10 @@ impl Editor {
         if self.board.get(&one).is_none() {
             return;
         }
-        let again = self.last_trail.contains(&one);
-        let links = if again { self.last_trail.clone() } else { vec![one] };
-        let kept = if again { self.last_kept.clone() } else { Vec::new() };
+        let (links, kept) = match self.walks.iter().find(|w| w.links.contains(&one)) {
+            Some(w) => (w.links.iter().filter(|l| self.board.get(l).is_some()).cloned().collect(), w.kept.iter().filter(|(id, _)| self.board.get(id).is_some()).cloned().collect()),
+            None => (vec![one], Vec::new()),
+        };
         self.trail = Some(Trail::new(&self.board, links, &kept, self.undo_stack.len(), self.layout));
         self.after_step();
     }
@@ -845,11 +852,76 @@ impl Editor {
         if t.leaving {
             return;
         }
-        self.last_trail = t.links.clone();
-        self.last_kept = t.kept();
+        let w = Walk { links: t.links.clone(), kept: t.kept() };
         t.leave();
+        self.remember_walk(w);
         self.mode = Mode::Idle;
         self.rebuild();
+    }
+
+    fn remember_walk(&mut self, w: Walk) {
+        self.walks.retain(|o| !o.links.iter().any(|l| w.links.contains(l)));
+        self.walks.insert(0, w);
+        self.walks.truncate(WALKS_KEPT);
+    }
+
+    /// Recent walks and the one going on, for the shell to keep on disk.
+    pub fn walks_json(&self) -> String {
+        let mut walks = self.walks.clone();
+        let active = self.trail.as_ref().filter(|t| !t.leaving).map(|t| Walk { links: t.links.clone(), kept: t.kept() });
+        if let Some(w) = &active {
+            walks.retain(|o| !o.links.iter().any(|l| w.links.contains(l)));
+            walks.insert(0, w.clone());
+        }
+        let pose = |p: &crate::trail::Pose| serde_json::json!([p.dx, p.dy, p.dw, p.dh, p.df]);
+        let list: Vec<_> = walks
+            .iter()
+            .take(WALKS_KEPT)
+            .map(|w| serde_json::json!({ "links": w.links, "kept": w.kept.iter().map(|(id, p)| serde_json::json!([id, pose(p)])).collect::<Vec<_>>() }))
+            .collect();
+        serde_json::json!({ "active": active.is_some(), "walks": list }).to_string()
+    }
+
+    /// Brings back walks kept by `walks_json`; the walk that was going on
+    /// when the app closed goes on again.
+    pub fn set_walks_json(&mut self, s: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else { return };
+        let f = |x: &serde_json::Value| x.as_f64().unwrap_or(0.0) as f32;
+        self.walks = v["walks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| {
+                let links: Vec<String> = w["links"].as_array()?.iter().filter_map(|l| l.as_str().map(String::from)).collect();
+                let kept = w["kept"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|k| {
+                        let p = k[1].as_array()?;
+                        Some((k[0].as_str()?.to_string(), crate::trail::Pose { dx: f(&p[0]), dy: f(&p[1]), dw: f(&p[2]), dh: f(&p[3]), df: f(&p[4]) }))
+                    })
+                    .collect();
+                (!links.is_empty()).then_some(Walk { links, kept })
+            })
+            .collect();
+        if v["active"].as_bool() == Some(true) && self.trail.is_none() {
+            let last = self.walks.first().and_then(|w| w.links.iter().rev().find(|l| self.board.get(l).is_some()).cloned());
+            if let Some(id) = last {
+                self.sel = vec![id];
+                // The camera opens on the walk, as close as it fits.
+                self.engine.cam.s = f64::MAX;
+                self.path_enter();
+                // Back where it was at once, not sliding out again.
+                if let Some(t) = &mut self.trail {
+                    t.finish();
+                }
+                if let Some(f) = self.flight.take() {
+                    (self.engine.cam.cx, self.engine.cam.cy, self.engine.cam.s) = f.to;
+                }
+                self.rebuild();
+            }
+        }
     }
 
     /// "Убрать из пути": a concept out goes back to its place.

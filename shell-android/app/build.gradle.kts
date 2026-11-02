@@ -16,8 +16,8 @@ android {
         applicationId = "com.hyperschema.app"
         minSdk = 30
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.7.3"
+        versionCode = 14
+        versionName = "0.7.5"
     }
 
     buildTypes {

@@ -52,6 +52,20 @@ impl Layout {
         }
     }
 
+    /// Name kept on disk (not shown).
+    pub fn key(self) -> &'static str {
+        match self {
+            Layout::Map => "map",
+            Layout::Near => "near",
+            Layout::Right => "right",
+            Layout::Down => "down",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<Layout> {
+        [Layout::Map, Layout::Near, Layout::Right, Layout::Down].into_iter().find(|l| l.key() == k.trim())
+    }
+
     /// One scale, nesting drawn as arrows.
     pub fn flat(self) -> bool {
         self != Layout::Map
@@ -637,6 +651,13 @@ impl Trail {
 
     pub fn animating(&self) -> bool {
         self.start.is_some()
+    }
+
+    /// Skips the slide: everything is drawn where it is going.
+    pub fn finish(&mut self) {
+        self.from.clear();
+        self.start = None;
+        self.shown = self.off.clone();
     }
 
     /// The walk ends: everything slides back to its place.

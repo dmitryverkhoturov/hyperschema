@@ -65,6 +65,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     /** The file's text as we last read or wrote it: tells a sync's change from ours. */
     private var lastText: String? = null
     private var pendingText: String? = null
+    /** Walks and their layout as last kept in preferences. */
+    private var walksSaved = ""
+    private var layoutSaved = ""
     private var uri: Uri? = null
     private val ui = Handler(Looper.getMainLooper())
     private val saver = Runnable { save() }
@@ -379,6 +382,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         val err = Native.load(handle, text)
         if (err != null) title.text = "не открылось: $err"
         else if (!Native.editable(handle)) title.text = "${title.text} · только просмотр"
+        // The walks of this board, the one going on when it closed resumed.
+        val prefs = getPreferences(MODE_PRIVATE)
+        prefs.getString("layout", null)?.let { Native.setLayout(handle, it) }
+        layoutSaved = Native.layout(handle)
+        if (err == null) prefs.getString("walks:$uri", null)?.let { Native.setWalks(handle, it) }
+        walksSaved = Native.walks(handle)
         sync()
     }
 
@@ -502,7 +511,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         if (editing) keepTypingVisible()
         plusBtn.visibility = if (editing || !Native.editable(handle)) View.GONE else View.VISIBLE
         updateButtons()
+        keepWalks()
         request()
+    }
+
+    /** Remembers the board's walks and their layout when they changed. */
+    private fun keepWalks() {
+        val u = uri ?: return
+        val w = Native.walks(handle)
+        val l = Native.layout(handle)
+        if (w == walksSaved && l == layoutSaved) return
+        walksSaved = w
+        layoutSaved = l
+        getPreferences(MODE_PRIVATE).edit().putString("walks:$u", w).putString("layout", l).apply()
     }
 
     /** The concept being typed into stays above the keyboard. */

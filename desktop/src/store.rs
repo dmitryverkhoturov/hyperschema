@@ -71,6 +71,15 @@ fn backup(path: &Path) {
     }
 }
 
+/// Where a board's walks are kept: per device, not in the board (two
+/// devices walking the same board would fight over them in sync).
+fn walks_file(board: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    board.to_string_lossy().to_lowercase().hash(&mut h);
+    crate::data_dir().join("walks").join(format!("{}-{:016x}.json", stem(board), h.finish()))
+}
+
 pub fn recent() -> Vec<PathBuf> {
     std::fs::read_to_string(crate::data_dir().join("recent.txt")).unwrap_or_default().lines().map(PathBuf::from).filter(|p| p.exists()).collect()
 }
@@ -99,6 +108,7 @@ impl State {
     pub fn open(&mut self, path: &Path) {
         self.commit_text();
         self.flush();
+        self.save_walks();
         let result = if is_excalidraw(path) {
             let target = path.with_file_name(format!("{}.{EXT}", stem(path)));
             if target.exists() {
@@ -163,7 +173,25 @@ impl State {
         }
         self.rebuild();
         self.ed.engine.fit();
+        // The walks of this board, the one going on when it closed resumed.
+        self.ed.trail = None;
+        let walks = std::fs::read_to_string(walks_file(path)).unwrap_or_default();
+        self.ed.set_walks_json(&walks);
+        self.walks_saved = self.ed.walks_json();
         Ok(())
+    }
+
+    /// Keeps the board's walks on disk when they changed.
+    pub fn save_walks(&mut self) {
+        let Some(path) = &self.path else { return };
+        let now = self.ed.walks_json();
+        if now != self.walks_saved {
+            let f = walks_file(path);
+            let _ = std::fs::create_dir_all(f.parent().unwrap());
+            if write_atomic(&f, &now).is_ok() {
+                self.walks_saved = now;
+            }
+        }
     }
 
     /// Queues a finished step for saving.

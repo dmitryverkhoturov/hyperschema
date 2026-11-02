@@ -26,6 +26,10 @@ object Native {
     external fun reload(h: Long, text: String): Boolean
     external fun editable(h: Long): Boolean
     external fun serialize(h: Long): String
+    external fun walks(h: Long): String
+    external fun setWalks(h: Long, s: String)
+    external fun layout(h: Long): String
+    external fun setLayout(h: Long, s: String)
     external fun setText(h: Long, text: String)
     external fun commitText(h: Long)
     external fun undo(h: Long, redo: Boolean)
