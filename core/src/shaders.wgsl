@@ -121,16 +121,22 @@ struct LineOut {
 
 @vertex
 fn vs_line(@builtin(vertex_index) vi: u32, l: LineIn) -> LineOut {
-    let a = to_screen(l.pts.xy);
+    var a = to_screen(l.pts.xy);
     let b = to_screen(l.pts.zw);
     var dir = b - a;
-    let len = length(dir);
+    var len = length(dir);
     dir = select(vec2<f32>(1.0, 0.0), dir / len, len > 1e-4);
     let nrm = vec2<f32>(-dir.y, dir.x);
     let lw_real = l.width * cam.scale;
     let lw = max(lw_real, 1.0);
     var hw = lw * 0.5 + 1.0;
-    if (l.kind == 1u) { hw = len * 0.6 + lw + 1.0; }
+    if (l.kind == 1u) {
+        // A head stays big enough to read the direction while its line
+        // is visible: about 11 px, less as the line fades out.
+        len = max(len, 11.0 * clamp(lw_real * 2.5, 0.0, 1.0));
+        a = b - dir * len;
+        hw = len * 0.5 + 1.0;
+    }
     let c = corner(vi);
     let along = select(-hw, len + hw, c.x > 0.0);
     let across = c.y * hw;
@@ -163,10 +169,10 @@ fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     if (i.p.z < 0.5) {
         d = seg_dist(i.uv, vec2<f32>(0.0, 0.0), vec2<f32>(len, 0.0)) - lw * 0.5;
     } else {
-        let tip = vec2<f32>(len, 0.0);
-        let d1 = seg_dist(i.uv, tip, vec2<f32>(0.0, len * 0.45));
-        let d2 = seg_dist(i.uv, tip, vec2<f32>(0.0, -len * 0.45));
-        d = min(d1, d2) - lw * 0.5;
+        // A filled triangle: tip at (len, 0), base corners at (0, ±0.42 len).
+        let k = 0.42;
+        let side = (abs(i.uv.y) - (len - i.uv.x) * k) / sqrt(1.0 + k * k);
+        d = max(-i.uv.x, side);
     }
     let a = i.color.a * clamp(0.5 - d, 0.0, 1.0);
     return vec4<f32>(i.color.rgb * a, a);

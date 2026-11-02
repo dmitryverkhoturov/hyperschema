@@ -191,6 +191,8 @@ pub struct State {
     shown: bool,
     /// Last non-maximised position and size.
     restore: Option<(i32, i32, u32, u32)>,
+    /// Arrowheads of the next connection as last saved (`arrows.txt`).
+    arrows_saved: (bool, bool),
 }
 
 impl std::ops::Deref for State {
@@ -213,6 +215,16 @@ impl State {
         let was_menu = chrome::part_at(prev.x, prev.y) == Some(chrome::Part::Menu);
         let is_menu = chrome::part_at(position.x, position.y) == Some(chrome::Part::Menu);
         self.cursor_in = true;
+        // A popup menu can swallow the button's release: a gesture still
+        // running with no button down ends here instead of dragging the
+        // concept along with the pointer.
+        if self.script.is_none() && harness().is_none() && !self.ed.touch && !matches!(self.ed.mode, Mode::Idle | Mode::Text { .. }) {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
+            let held = unsafe { [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|k| GetAsyncKeyState(k.0 as i32) as u16 & 0x8000 != 0) };
+            if !held {
+                self.release();
+            }
+        }
         if self.timeline.as_ref().is_some_and(|t| t.dragging) {
             self.timeline_drag();
             self.window.request_redraw();
@@ -397,8 +409,16 @@ impl ApplicationHandler for App {
             pending: false,
             shown: false,
             restore,
+            arrows_saved: (false, true),
         };
         st.ed.show_nested_links = std::fs::read_to_string(data_dir().join("show-nested-links.txt")).is_ok_and(|s| s.trim() == "1");
+        if let Ok(a) = std::fs::read_to_string(data_dir().join("arrows.txt")) {
+            let b: Vec<bool> = a.trim().chars().map(|c| c == '1').collect();
+            if let [f, t] = b[..] {
+                st.ed.next_arrows = (f, t);
+                st.arrows_saved = (f, t);
+            }
+        }
 
         if let Some(n) = self.args.bench {
             st.ed.engine.set_scene(bench::generate(n));
@@ -697,6 +717,10 @@ impl ApplicationHandler for App {
                         st.settle();
                     }
                     Key::Named(NamedKey::Home) => st.ed.engine.fit(),
+                    Key::Named(NamedKey::F11) => {
+                        let full = st.window.fullscreen().is_some();
+                        st.window.set_fullscreen(if full { None } else { Some(winit::window::Fullscreen::Borderless(None)) });
+                    }
                     Key::Character("f") | Key::Character("а") if !ctrl => st.ed.engine.fit(),
                     Key::Character("=") | Key::Character("+") => st.ed.engine.zoom_at(1.25, cx, cy),
                     Key::Character("-") => st.ed.engine.zoom_at(0.8, cx, cy),

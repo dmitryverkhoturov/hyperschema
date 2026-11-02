@@ -121,6 +121,11 @@ impl State {
         for c in std::mem::take(&mut self.ed.done) {
             self.record(c);
         }
+        if self.ed.next_arrows != self.arrows_saved {
+            self.arrows_saved = self.ed.next_arrows;
+            let (f, t) = self.arrows_saved;
+            let _ = std::fs::write(crate::data_dir().join("arrows.txt"), format!("{}{}", f as u8, t as u8));
+        }
     }
 
     fn menu_choice(&mut self, x: f64, y: f64, items: &[(i32, String, bool)]) -> i32 {

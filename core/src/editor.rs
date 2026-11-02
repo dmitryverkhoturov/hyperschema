@@ -100,7 +100,9 @@ pub enum Mode {
     Boxing { from: (f64, f64), add: bool },
     Resize { id: String, handle: Handle, base: Board, start: (f64, f64) },
     Connect { from: String },
-    EdgeEnd { edge: String, moving_from: bool },
+    /// An end of the selected connection: a click turns its arrowhead on
+    /// or off, a drag moves the end to another concept.
+    EdgeEnd { edge: String, moving_from: bool, at: Pos, moved: bool },
     Text { target: TextTarget, text: String, created: bool },
     /// Path mode: a concept out of the walk dragged to a new spot (only
     /// where it is drawn; the board does not move).
@@ -210,12 +212,21 @@ pub struct Editor {
     /// tap edits that concept even though the camera moved under it.
     last_step: Option<(String, Instant)>,
     /// Concepts left out on the last walk, where they were.
-    last_kept: Vec<(String, (f32, f32))>,
+    last_kept: Vec<(String, crate::trail::Pose)>,
     /// Layout of the walk, kept for the next one.
     pub layout: Layout,
     /// Screen y where the path bar starts (under the shell's own strip).
     pub ui_top: f32,
     bar_hits: Vec<([f32; 4], i32)>,
+    /// Arrowheads (from end, to end) of the next new connection: the look
+    /// of the last one made or changed.
+    pub next_arrows: (bool, bool),
+    /// When the hovered concept changed (its outline thickens smoothly).
+    hover_at: Instant,
+    /// The selection before a press picked another concept: a finger
+    /// that only drags it puts the selection back (no bar pops up for a
+    /// concept just moved).
+    sel_before: Option<Vec<String>>,
 }
 
 impl Editor {
@@ -264,6 +275,9 @@ impl Editor {
             layout: Layout::default(),
             ui_top: 0.0,
             bar_hits: Vec::new(),
+            next_arrows: (false, true),
+            hover_at: Instant::now(),
+            sel_before: None,
         }
     }
 
@@ -347,21 +361,14 @@ impl Editor {
         self.dp() * if id.is_empty() { 10.0 } else { 4.0 }
     }
 
-    /// Concepts showing connection dots: the single selected one, and the
-    /// hovered one with a mouse.
+    /// Concepts showing connection dots: the single selected one (hover
+    /// only thickens the outline; dots under a moving pointer were hard to
+    /// catch).
     fn dot_nodes(&self) -> Vec<String> {
-        let mut v = Vec::new();
-        if let [one] = &self.sel[..] {
-            v.push(one.clone());
+        match &self.sel[..] {
+            [one] => vec![one.clone()],
+            _ => Vec::new(),
         }
-        if !self.touch {
-            if let Some(h) = &self.hover {
-                if !v.contains(h) {
-                    v.push(h.clone());
-                }
-            }
-        }
-        v
     }
 
     fn dot_off(&self) -> f32 {
@@ -486,6 +493,7 @@ impl Editor {
     /// Selection, handles, things being dragged, caret, guides. Called once
     /// per frame, so it also applies a pending drag.
     pub fn refresh_overlay(&mut self) {
+        self.edge_pan();
         self.flush_drag();
         self.fly();
         self.tick_trail();
@@ -526,6 +534,22 @@ impl Editor {
                 }
             }
         }
+        // The concept under the mouse: its outline thickens smoothly.
+        if let Some(n) = self.hover.as_ref().filter(|h| !self.touch && !self.sel.contains(h) && matches!(self.mode, Mode::Idle)).and_then(|h| board.get(h)) {
+            let k = self.hover_k();
+            if k > 0.0 {
+                let o = 1.6 * dp * k;
+                let a = (k * 255.0) as u8;
+                let ink = crate::scene::parse_color(n.color.as_deref().unwrap_or(view::INK), 1.0) & 0x00ff_ffff | (a as u32) << 24;
+                let shape = match n.shape {
+                    NShape::Ellipse => Shape::Ellipse,
+                    NShape::Diamond => Shape::Diamond,
+                    _ => Shape::Rect,
+                };
+                let radius = if shape == Shape::Rect && n.shape != NShape::Text { (n.w.min(n.h) * 0.12).min(n.font * 0.8) + o } else { 0.0 };
+                ov.rects.push(Rect { x: n.x - o, y: n.y - o, w: n.w + 2.0 * o, h: n.h + 2.0 * o, fill: 0, stroke: ink, stroke_w: o, radius, shape });
+            }
+        }
         for id in &self.sel {
             if let Some(n) = board.get(id) {
                 outline(&mut ov, n.bbox(), 4.0 * dp, blue(255), 1.5 * dp);
@@ -549,7 +573,7 @@ impl Editor {
                 for w in p.windows(2) {
                     ov.lines.push(Line { x0: w[0].0, y0: w[0].1, x1: w[1].0, y1: w[1].1, color: blue(90), width: 7.0 * dp, head: false });
                 }
-                if !matches!(self.mode, Mode::EdgeEnd { .. }) {
+                if !matches!(self.mode, Mode::EdgeEnd { moved: true, .. }) {
                     let r = self.handle_r() * 1.2;
                     dot(&mut ov, p[0], r, rgba(255, 255, 255, 255));
                     dot(&mut ov, p[p.len() - 1], r, rgba(255, 255, 255, 255));
@@ -618,7 +642,7 @@ impl Editor {
                     }
                 }
             }
-            Mode::EdgeEnd { edge, moving_from } => {
+            Mode::EdgeEnd { edge, moving_from, moved: true, .. } => {
                 if let Some(e) = board.edge(edge) {
                     let fixed = if *moving_from { &e.to } else { &e.from };
                     if let Some(a) = board.get(fixed) {
@@ -637,6 +661,33 @@ impl Editor {
             _ => {}
         }
         self.engine.set_overlay(&ov);
+    }
+
+    /// How fast the view should scroll while something is dragged to the
+    /// window's edge (screen pixels per frame), if it should.
+    fn edge_push(&self) -> Option<(f64, f64)> {
+        let dragging = matches!(self.mode, Mode::Connect { .. } | Mode::EdgeEnd { moved: true, .. } | Mode::Move { .. } | Mode::Boxing { .. } | Mode::PathDrag { .. });
+        if !dragging || self.frozen {
+            return None;
+        }
+        let (w, h) = self.engine.size();
+        let band = 36.0 * self.ui as f64;
+        let c = self.cursor;
+        let push = |d: f64| if d < band { ((band - d) / band).min(1.5) } else { 0.0 };
+        let top = self.ui_top as f64;
+        let (vx, vy) = (push(c.x) - push(w as f64 - c.x), push(c.y - top) - push(h as f64 - c.y));
+        let speed = 12.0 * self.ui as f64;
+        (vx != 0.0 || vy != 0.0).then_some((vx * speed, vy * speed))
+    }
+
+    /// Scrolls the view while a connection, concept or box is dragged to
+    /// the window's edge; what is dragged stays under the pointer.
+    fn edge_pan(&mut self) {
+        let Some((dx, dy)) = self.edge_push() else { return };
+        self.engine.pan(dx, dy);
+        if matches!(self.mode, Mode::Move { .. } | Mode::PathDrag { .. }) {
+            self.drag_pending = true;
+        }
     }
 
     /// The label showing `text` for a text target, laid out as drawn.
@@ -738,9 +789,15 @@ impl Editor {
         matches!(self.mode, Mode::Idle | Mode::Resize { .. } | Mode::Press { .. }) && !self.frozen && !self.path_active()
     }
 
+    /// How far the hover outline has thickened, 0..1 over 140 ms.
+    fn hover_k(&self) -> f32 {
+        let t = (self.hover_at.elapsed().as_secs_f32() / 0.14).min(1.0);
+        1.0 - (1.0 - t) * (1.0 - t)
+    }
+
     /// True while the overlay changes by itself (caret blink).
     pub fn animating(&self) -> bool {
-        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some() || self.trail.as_ref().is_some_and(|t| t.animating())
+        matches!(self.mode, Mode::Text { .. }) || self.flight.is_some() || self.trail.as_ref().is_some_and(|t| t.animating()) || (self.hover.is_some() && self.hover_k() < 1.0) || self.edge_push().is_some()
     }
 
     // ------------------------------------------------------------ path mode
@@ -1079,16 +1136,20 @@ impl Editor {
                 }
             }
         }
+        // In the walk only what is out in front can be hit; the dimmed
+        // board behind is background.
+        let front = self.front();
+        let live = |id: &str| front.as_ref().is_none_or(|f| f.contains(id));
         // Text concepts sit on top of whatever they overlap.
         for n in board.nodes.iter().rev() {
-            if n.shape == NShape::Text && inside(&n.bbox(), p, tol) {
+            if n.shape == NShape::Text && live(&n.id) && inside(&n.bbox(), p, tol) {
                 return Hit::Node(n.id.clone());
             }
         }
         // A concept under the pointer wins over a connection crossing it:
         // a press usually means grabbing, and zoomed out connections cover
         // much of the screen.
-        let under = match board.deepest_at(p.0, p.1, &HashSet::new()) {
+        let under = match self.deepest(p) {
             None => Hit::Empty,
             Some(id) => {
                 let n = board.node(&id);
@@ -1101,7 +1162,7 @@ impl Editor {
                 Hit::Inside(id)
             }
         };
-        for e in board.edges.iter().filter(|e| e.kind == Kind::Link) {
+        for e in board.edges.iter().filter(|e| e.kind == Kind::Link && live(&e.from) && live(&e.to)) {
             if let Some(path) = self.routes.get(&e.id) {
                 if path.windows(2).any(|w| seg_dist(p, w[0], w[1]) < tol) {
                     return Hit::Edge(e.id.clone());
@@ -1109,6 +1170,24 @@ impl Editor {
             }
         }
         under
+    }
+
+    /// In the walk: the concepts out in front (the rest is background).
+    fn front(&self) -> Option<HashSet<String>> {
+        self.trail.as_ref().filter(|t| !t.leaving).map(|t| t.bright(&self.board))
+    }
+
+    /// The smallest concept under `p` that can be hit (in the walk: only
+    /// those out in front, whatever dimmed lies under them).
+    fn deepest(&self, p: Pt) -> Option<String> {
+        let board = self.shown();
+        let Some(front) = self.front() else { return board.deepest_at(p.0, p.1, &HashSet::new()) };
+        board
+            .nodes
+            .iter()
+            .filter(|n| n.shape != NShape::Text && front.contains(&n.id) && inside(&n.bbox(), p, 0.0))
+            .min_by(|a, b| (a.w * a.h).total_cmp(&(b.w * b.h)))
+            .map(|n| n.id.clone())
     }
 
     /// A leaf big on screen has room for concepts inside: away from its
@@ -1155,9 +1234,9 @@ impl Editor {
             .nodes
             .iter()
             .rev()
-            .find(|n| n.shape == NShape::Text && inside(&n.bbox(), p, tol))
+            .find(|n| n.shape == NShape::Text && self.front().is_none_or(|f| f.contains(&n.id)) && inside(&n.bbox(), p, tol))
             .map(|n| n.id.clone())
-            .or_else(|| board.deepest_at(p.0, p.1, &HashSet::new()))?;
+            .or_else(|| self.deepest(p))?;
         (t != from && !board.is_ancestor(&t, from) && !board.is_ancestor(from, &t)).then_some(t)
     }
 
@@ -1171,18 +1250,11 @@ impl Editor {
                 let n = self.shown().get(&id);
                 n.filter(|n| n.shape != NShape::Text).map(|n| n.id.clone())
             }
-            Hit::Dot(id) => Some(id),
-            // On the way from a concept to one of its dots the pointer
-            // crosses empty canvas: keep the hover so the dots stay put.
-            Hit::Empty | Hit::Inside(_) => {
-                let p = self.world();
-                let keep = self.dot_off() + self.reach();
-                self.hover.clone().filter(|h| self.shown().get(h).is_some_and(|n| inside(&n.bbox(), p, keep)))
-            }
             _ => None,
         };
         if new != self.hover {
             self.hover = new;
+            self.hover_at = Instant::now();
             return true;
         }
         false
@@ -1335,7 +1407,7 @@ impl Editor {
             }
             Hit::Dot(id) => self.mode = Mode::Connect { from: id },
             Hit::Node(id) if alt => self.mode = Mode::Connect { from: id },
-            Hit::EdgeEnd(e, from) => self.mode = Mode::EdgeEnd { edge: e, moving_from: from },
+            Hit::EdgeEnd(e, from) => self.mode = Mode::EdgeEnd { edge: e, moving_from: from, at, moved: false },
             Hit::EdgeMid(e) => self.mode = Mode::Press { at, node: None, double: false, edge_mid: Some(e) },
             Hit::Edge(e) => {
                 self.sel.clear();
@@ -1350,7 +1422,7 @@ impl Editor {
                         self.sel.push(id.clone());
                     }
                 } else if !self.sel.contains(&id) {
-                    self.sel = vec![id.clone()];
+                    self.sel_before = Some(std::mem::replace(&mut self.sel, vec![id.clone()]));
                 }
                 self.mode = Mode::Press { at, node: Some(id), double: false, edge_mid: None };
             }
@@ -1416,7 +1488,13 @@ impl Editor {
                 self.drag_pending = true;
                 true
             }
-            Mode::Boxing { .. } | Mode::Connect { .. } | Mode::EdgeEnd { .. } => true,
+            Mode::EdgeEnd { at, moved, .. } => {
+                if (at.x - cur.x).hypot(at.y - cur.y) > 4.0 {
+                    *moved = true;
+                }
+                true
+            }
+            Mode::Boxing { .. } | Mode::Connect { .. } => true,
             _ => false,
         }
     }
@@ -1699,6 +1777,12 @@ impl Editor {
         self.text_drag = false;
         self.flush_drag();
         let walking = self.path_active();
+        let before = self.sel_before.take();
+        if self.touch && matches!(self.mode, Mode::Move { .. } | Mode::PathDrag { .. }) {
+            if let Some(b) = before {
+                self.sel = b;
+            }
+        }
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             // In the walk a tap on empty canvas folds untouched neighbours.
             Mode::Pan { moved: false, .. } if walking => {
@@ -1771,11 +1855,26 @@ impl Editor {
                 }
             }
             Mode::Connect { from } => self.finish_connect(from),
-            Mode::EdgeEnd { edge, moving_from } => {
+            Mode::EdgeEnd { edge, moving_from, moved: false, .. } => {
+                // A click on an end turns its arrowhead on or off; the next
+                // connection is drawn the same way.
+                self.begin();
+                if let Some(e) = self.board.edge_mut(&edge) {
+                    if moving_from {
+                        e.arrow_from = !e.arrow_from;
+                    } else {
+                        e.arrow_to = !e.arrow_to;
+                    }
+                    self.next_arrows = arrow_kind(e.arrow_from, e.arrow_to);
+                }
+                self.commit();
+            }
+            Mode::EdgeEnd { edge, moving_from, .. } => {
                 let fixed = self.board.edge(&edge).map(|e| if moving_from { e.to.clone() } else { e.from.clone() });
                 if let Some(fixed) = fixed {
                     if let Some(t) = self.connect_target(&fixed) {
-                        if self.board.edge_between(&t, &fixed).is_none() {
+                        let (a, b) = if moving_from { (t.clone(), fixed.clone()) } else { (fixed.clone(), t.clone()) };
+                        if self.link_free(&a, &b) {
                             self.begin();
                             let e = self.board.edge_mut(&edge).unwrap();
                             if moving_from {
@@ -1814,9 +1913,9 @@ impl Editor {
     fn finish_connect(&mut self, from: String) {
         let p = self.world();
         if let Some(t) = self.connect_target(&from) {
-            if self.board.edge_between(&from, &t).is_none() {
+            if self.link_free(&from, &t) {
                 self.begin();
-                let e = self.board.add_edge(&from, &t, Kind::Link);
+                let e = self.add_link(&from, &t);
                 self.commit();
                 self.sel.clear();
                 self.sel_edge = Some(e);
@@ -1840,13 +1939,30 @@ impl Editor {
         self.begin();
         let id = self.place_new(p, parent.as_deref());
         if !self.board.is_ancestor(&id, &from) {
-            self.board.add_edge(&from, &id, Kind::Link);
+            self.add_link(&from, &id);
         }
         self.sel = vec![id.clone()];
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
         self.caret_epoch = Instant::now();
+    }
+
+    /// A new connection drawn the way the last one was.
+    fn add_link(&mut self, from: &str, to: &str) -> String {
+        let id = self.board.add_edge(from, to, Kind::Link);
+        let (af, at) = self.next_arrows;
+        if let Some(e) = self.board.edge_mut(&id) {
+            (e.arrow_from, e.arrow_to) = (af, at);
+        }
+        id
+    }
+
+    /// Whether a connection `from` -> `to` may be added: two concepts hold
+    /// at most two, one each way.
+    fn link_free(&self, from: &str, to: &str) -> bool {
+        let between: Vec<_> = self.board.edges.iter().filter(|e| (e.from == from && e.to == to) || (e.from == to && e.to == from)).collect();
+        between.len() < 2 && !between.iter().any(|e| e.kind != Kind::Link || (e.from == from && e.to == to))
     }
 
     /// Adds a concept centred at `p`, about 160x80 px on screen, nested in
@@ -1944,7 +2060,7 @@ impl Editor {
         if let Some(q) = &parent {
             self.board.set_parent(&id, Some(q));
         }
-        self.board.add_edge(anchor, &id, Kind::Link);
+        self.add_link(anchor, &id);
         if let Some(t) = &mut self.trail {
             t.adopt(&self.board, &id, anchor, at);
         }
@@ -2048,8 +2164,19 @@ impl Editor {
         let lh = LINE_H * l.size;
         let last = slots.iter().map(|s| s.2).max().unwrap_or(0);
         if strict {
+            // Off the text (on the concept's border or empty room) the press
+            // leaves typing and picks the concept itself: handles, dots.
             let on = match target {
-                TextTarget::Node(id) => board.get(id).is_some_and(|n| inside(&n.bbox(), p, self.tol())),
+                TextTarget::Node(id) => board.get(id).is_some_and(|n| {
+                    // An empty new concept would vanish on leaving: the whole of it is text.
+                    if n.shape == NShape::Text || text.trim().is_empty() {
+                        inside(&n.bbox(), p, self.tol())
+                    } else if board.has_children(id) {
+                        inside(&[n.x, n.y, n.x + n.w, n.y + board.title_h(n, self.title_lines(n))], p, 0.0)
+                    } else {
+                        self.on_text(n, p)
+                    }
+                }),
                 TextTarget::Edge(_) => {
                     let (x0, x1) = slots.iter().fold((f32::MAX, f32::MIN), |(a, b), s| (a.min(s.0), b.max(s.0)));
                     inside(&[x0, l.y, x1, l.y + (last + 1) as f32 * lh], p, self.tol() + l.size)
@@ -2296,7 +2423,9 @@ impl Editor {
                     nn.h = h.max(n.font * LINE_H);
                 } else if !self.board.has_children(id) {
                     let (bw, bh) = self.text_box.unwrap_or((n.w, n.h));
-                    let want_w = (tw.min(n.font * 14.0) + 2.0 * pad).max(bw);
+                    // Typing widens the concept a little, then wraps and
+                    // grows it downward.
+                    let want_w = (tw + 2.0 * pad).min(n.font * 10.0).max(bw);
                     let lines = self.lines(text, n.font, want_w - 2.0 * pad) as f32;
                     nn.w = want_w;
                     nn.h = bh.max(lines * LINE_H * n.font + 2.0 * pad);
@@ -2495,7 +2624,7 @@ impl Editor {
             board.fit_ancestors(&id, &one);
             self.board = board;
         }
-        self.board.add_edge(&n.id, &id, Kind::Link);
+        self.add_link(&n.id, &id);
         self.sel = vec![id.clone()];
         self.sel_edge = None;
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
@@ -2659,6 +2788,7 @@ impl Editor {
                 if let Some(e) = self.board.edge_mut(eid) {
                     e.arrow_from = choice == 3 || choice == 4;
                     e.arrow_to = choice == 2 || choice == 4;
+                    self.next_arrows = arrow_kind(e.arrow_from, e.arrow_to);
                 }
                 self.commit();
             }
@@ -2672,6 +2802,16 @@ impl Editor {
             _ => {}
         }
         self.rebuild();
+    }
+}
+
+/// The kind of a connection for the next one: a line, an arrow (always
+/// toward where it is dragged) or both ways.
+fn arrow_kind(from: bool, to: bool) -> (bool, bool) {
+    if from != to {
+        (false, true)
+    } else {
+        (from, to)
     }
 }
 

@@ -66,9 +66,9 @@ impl Node {
     pub fn pad(&self) -> f32 {
         self.font * 0.5
     }
-    /// Margin kept around a parent's content when it shrinks: one title line.
+    /// Margin kept around a parent's content: half a line of its font.
     pub fn gap(&self) -> f32 {
-        self.font * crate::text::LINE_H
+        self.font * 0.5
     }
 }
 

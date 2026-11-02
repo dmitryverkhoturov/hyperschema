@@ -204,13 +204,14 @@ fn spot(cb: Bbox, w: f32, h: f32, base: f32, gap: f32, taken: &[Bbox]) -> Bbox {
 impl Trail {
     /// A walk along `links`; `kept` are concepts left out last time, where
     /// they were.
-    pub fn new(b: &Board, links: Vec<String>, kept: &[(String, Off)], undo_len: usize, layout: Layout) -> Trail {
+    pub fn new(b: &Board, links: Vec<String>, kept: &[(String, Pose)], undo_len: usize, layout: Layout) -> Trail {
+        let touched = kept.iter().filter(|k| b.get(&k.0).is_some() && !links.contains(&k.0)).map(|k| k.0.clone()).collect();
         let mut t = Trail {
             marks: vec![undo_len; links.len()],
             links,
             open: Vec::new(),
             expanded: true,
-            touched: kept.iter().filter(|k| b.get(&k.0).is_some()).map(|k| k.0.clone()).collect(),
+            touched,
             dragged: HashSet::new(),
             closed: HashSet::new(),
             born: HashMap::new(),
@@ -222,19 +223,35 @@ impl Trail {
             known: b.nodes.iter().map(|n| n.id.clone()).collect(),
             leaving: false,
         };
-        for (id, o) in kept {
+        for (id, p) in kept {
             if t.touched.contains(id) {
-                t.off.insert(id.clone(), Pose::at(*o));
+                t.off.insert(id.clone(), Pose::at(p.off()));
             }
         }
         t.reopen(b);
         t.relayout(b);
+        // Everything left out comes back exactly where it was, the path
+        // too (laid out afresh it would land elsewhere).
+        if kept.iter().any(|k| t.links.contains(&k.0)) {
+            for (id, p) in kept {
+                if b.get(id).is_some() && t.off.contains_key(id) {
+                    t.off.insert(id.clone(), *p);
+                }
+            }
+            // Untouched neighbours go out again around what came back.
+            for id in t.open.clone() {
+                if !t.touched.contains(&id) && !t.links.contains(&id) {
+                    t.off.remove(&id);
+                }
+            }
+            t.settle(b);
+        }
         t
     }
 
     /// What stays out besides the path, to bring back on the next walk.
-    pub fn kept(&self) -> Vec<(String, Off)> {
-        self.touched.iter().filter(|id| !self.links.contains(id)).filter_map(|id| self.off.get(id).map(|p| (id.clone(), p.off()))).collect()
+    pub fn kept(&self) -> Vec<(String, Pose)> {
+        self.touched.iter().chain(self.links.iter()).filter_map(|id| self.off.get(id).map(|p| (id.clone(), *p))).collect()
     }
 
     /// Out concepts that can be closed by hand: everything out but the path.
