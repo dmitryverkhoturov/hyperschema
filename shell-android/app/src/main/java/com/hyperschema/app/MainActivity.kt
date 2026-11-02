@@ -480,6 +480,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             syncingField = false
             field.requestFocus()
             imm.showSoftInput(field, 0)
+        } else if (text != null && editing && text != field.text.toString()) {
+            // The core changed the text (↶ while typing): the field follows.
+            syncingField = true
+            field.setText(text)
+            field.setSelection(field.text.length)
+            syncingField = false
         } else if (text == null && editing) {
             editing = false
             imm.hideSoftInputFromWindow(field.windowToken, 0)

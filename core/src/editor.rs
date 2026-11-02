@@ -58,6 +58,7 @@ pub const NODE_WRAP: i32 = 32;
 pub const NODE_DELETE: i32 = 33;
 pub const NODE_DELETE_DEEP: i32 = 34;
 pub const NODE_PATH: i32 = 35;
+pub const NODE_CLOSE: i32 = 36;
 pub const CANVAS_NEW: i32 = 40;
 
 const BLUE: (u8, u8, u8) = (0x4a, 0x7d, 0xff);
@@ -200,6 +201,16 @@ pub struct Editor {
     display: Option<Board>,
     /// The last walk, so leaving by mistake loses nothing.
     last_trail: Vec<String>,
+    /// Text being typed: earlier states (text, caret) for Ctrl+Z, and
+    /// those undone for Ctrl+Y; typing is grouped into words and pauses.
+    text_undo: Vec<(String, usize)>,
+    text_redo: Vec<(String, usize)>,
+    text_last: Option<(Instant, bool)>,
+    /// The last step taken by a tap, and when: the second tap of a double
+    /// tap edits that concept even though the camera moved under it.
+    last_step: Option<(String, Instant)>,
+    /// Concepts left out on the last walk, where they were.
+    last_kept: Vec<(String, (f32, f32))>,
     /// Layout of the walk, kept for the next one.
     pub layout: Layout,
     /// Screen y where the path bar starts (under the shell's own strip).
@@ -245,6 +256,11 @@ impl Editor {
             trail: None,
             display: None,
             last_trail: Vec::new(),
+            last_kept: Vec::new(),
+            last_step: None,
+            text_undo: Vec::new(),
+            text_redo: Vec::new(),
+            text_last: None,
             layout: Layout::default(),
             ui_top: 0.0,
             bar_hits: Vec::new(),
@@ -266,6 +282,7 @@ impl Editor {
         self.step_base = None;
         self.trail = None;
         self.last_trail.clear();
+        self.last_kept.clear();
         self.rebuild();
     }
 
@@ -696,6 +713,14 @@ impl Editor {
             let pad = 5.0 * dp;
             ov.rects.push(Rect { x: b[0] - pad, y: b[1] - pad, w: b[2] - b[0] + 2.0 * pad, h: b[3] - b[1] + 2.0 * pad, fill: 0, stroke: path_red(255), stroke_w: 2.5 * dp, radius: 4.0 * dp, shape: Shape::Rect });
         }
+        // Close buttons: a small grey cross on the top left corner.
+        for (_, c, r) in self.close_spots() {
+            ov.rects.push(Rect { x: c.0 - r, y: c.1 - r, w: 2.0 * r, h: 2.0 * r, fill: rgba(0x8a, 0x8a, 0x8a, 235), stroke: rgba(255, 255, 255, 255), stroke_w: 1.5 * self.px(), radius: 0.0, shape: Shape::Ellipse });
+            let a = r * 0.42;
+            for (sx, sy) in [(1.0, 1.0), (1.0, -1.0)] {
+                ov.lines.push(Line { x0: c.0 - a * sx, y0: c.1 - a * sy, x1: c.0 + a * sx, y1: c.1 + a * sy, color: rgba(255, 255, 255, 255), width: 1.6 * self.px(), head: false });
+            }
+        }
         for id in t.out() {
             let k = t.unopened(&self.board, &id);
             let Some(n) = board.get(&id).filter(|_| k > 0) else { continue };
@@ -734,8 +759,10 @@ impl Editor {
         if self.board.get(&one).is_none() {
             return;
         }
-        let links = if self.last_trail.contains(&one) { self.last_trail.clone() } else { vec![one] };
-        self.trail = Some(Trail::new(&self.board, links, self.undo_stack.len(), self.layout));
+        let again = self.last_trail.contains(&one);
+        let links = if again { self.last_trail.clone() } else { vec![one] };
+        let kept = if again { self.last_kept.clone() } else { Vec::new() };
+        self.trail = Some(Trail::new(&self.board, links, &kept, self.undo_stack.len(), self.layout));
         self.after_step();
     }
 
@@ -747,9 +774,43 @@ impl Editor {
             return;
         }
         self.last_trail = t.links.clone();
+        self.last_kept = t.kept();
         t.leave();
         self.mode = Mode::Idle;
         self.rebuild();
+    }
+
+    /// "Убрать из пути": a concept out goes back to its place.
+    pub fn path_close(&mut self, id: &str) {
+        self.commit_text();
+        let Some(t) = self.trail.as_mut().filter(|t| !t.leaving) else { return };
+        if t.close(&self.board, id) {
+            let cur = t.current().to_string();
+            self.sel = vec![cur];
+            self.sel_edge = None;
+            self.rebuild();
+        }
+    }
+
+    /// Whether `id` can be closed by hand now.
+    pub fn path_closable(&self, id: &str) -> bool {
+        self.trail.as_ref().filter(|t| !t.leaving).is_some_and(|t| t.closable().iter().any(|c| c == id))
+    }
+
+    /// Where the close button of each concept that can be closed sits:
+    /// (id, centre, radius) in world units.
+    fn close_spots(&self) -> Vec<(String, Pt, f32)> {
+        let Some(t) = self.trail.as_ref().filter(|t| !t.leaving) else { return Vec::new() };
+        let board = self.shown();
+        let r = 8.0 * self.dp();
+        t.closable().into_iter().filter_map(|id| board.get(&id).map(|n| (id.clone(), (n.x, n.y), r))).collect()
+    }
+
+    /// The close button under the pointer, if any.
+    fn close_hit(&self) -> Option<String> {
+        let p = self.world();
+        let grab = if self.touch { 2.0 } else { 1.3 };
+        self.close_spots().into_iter().find(|(_, c, r)| (p.0 - c.0).hypot(p.1 - c.1) <= r * grab).map(|s| s.0)
     }
 
     /// Switches the walk's layout (`None`: the next one); the next walk
@@ -1152,6 +1213,11 @@ impl Editor {
     }
 
     pub fn undo(&mut self, redo: bool) {
+        // While typing, Ctrl+Z undoes the typing, never more.
+        if self.editing_text() {
+            self.text_undo_step(redo);
+            return;
+        }
         self.commit_text();
         // In the walk Ctrl+Z first undoes edits made since the last step,
         // then the step itself.
@@ -1211,6 +1277,11 @@ impl Editor {
             self.mode = Mode::Idle;
             return;
         }
+        if let Some(id) = self.close_hit() {
+            self.path_close(&id);
+            self.mode = Mode::Idle;
+            return;
+        }
         // Hover is not tracked while typing: find what is under the pointer now.
         self.update_hover();
         if self.frozen {
@@ -1229,6 +1300,13 @@ impl Editor {
         }
         let at = self.cursor;
         if double {
+            if let Some((id, t)) = self.last_step.take() {
+                if self.path_active() && t.elapsed().as_millis() < 600 && self.board.get(&id).is_some() {
+                    self.flight = None;
+                    self.start_text(TextTarget::Node(id), false);
+                    return;
+                }
+            }
             match hit {
                 // A leaf off its text: a concept nested in it, like a parent's inside.
                 Hit::Node(id) if self.nest_spot(&id) => {
@@ -1643,12 +1721,18 @@ impl Editor {
                         t.step(&self.board, &id, undo_len);
                     }
                 }
+                self.last_step = Some((id, Instant::now()));
                 self.after_step();
                 return;
             }
             Mode::PathDrag { id, .. } => {
                 if let Some(t) = &mut self.trail {
                     t.touch(&id);
+                }
+                if self.trail.as_ref().is_some_and(|t| t.born(&id)) {
+                    self.begin();
+                    self.home_born(&id);
+                    self.commit();
                 }
             }
             Mode::Pan { moved: false, .. } => {
@@ -1739,8 +1823,14 @@ impl Editor {
             }
             return;
         }
-        let Some(a) = self.board.get(&from).cloned() else { return };
+        let Some(a) = self.shown().get(&from).cloned() else { return };
         if inside(&a.bbox(), p, self.tol()) {
+            return;
+        }
+        if self.path_active() {
+            if let Some(id) = self.walk_new(&from, Some(p)) {
+                self.edit_new(id);
+            }
             return;
         }
         // Released on empty space: a new concept there, already connected.
@@ -1839,8 +1929,69 @@ impl Editor {
         }
     }
 
+    /// A new concept in the walk, made from `anchor` and connected to it:
+    /// laid out as one more neighbour (or centred at `at`, where it was
+    /// dropped). On the board it goes beside `anchor`, in the same frame,
+    /// the way it sits beside it here; the walk keeps it drawn where it is.
+    fn walk_new(&mut self, anchor: &str, at: Option<Pt>) -> Option<String> {
+        let a = self.board.get(anchor).cloned()?;
+        let parent = self.board.parent(anchor).map(String::from);
+        self.begin();
+        let id = self.board.new_id();
+        // The look of the concept it continues; a frame gives a plain leaf.
+        let (w, h, shape, fill) = if a.shape != NShape::Text && !self.board.has_children(anchor) { (a.w, a.h, a.shape, a.fill.clone()) } else { (a.font * 8.0, a.font * 4.0, NShape::Box, None) };
+        self.board.add_node(Node { id: id.clone(), x: a.x + a.w + a.font * 2.0, y: a.y, w, h, text: String::new(), font: a.font, shape, color: None, fill, extra: Map::new() });
+        if let Some(q) = &parent {
+            self.board.set_parent(&id, Some(q));
+        }
+        self.board.add_edge(anchor, &id, Kind::Link);
+        if let Some(t) = &mut self.trail {
+            t.adopt(&self.board, &id, anchor, at);
+        }
+        self.home_born(&id);
+        Some(id)
+    }
+
+    /// Puts a concept made in the walk on the board where it is drawn
+    /// (beside what it came from), clear of others; it stays drawn there.
+    fn home_born(&mut self, id: &str) {
+        let Some(t) = &self.trail else { return };
+        let (Some(home), Some((bx, f))) = (t.home_for(&self.board, id), t.drawn(&self.board, id)) else { return };
+        if let Some(n) = self.board.get_mut(id) {
+            (n.x, n.y, n.w, n.h, n.font) = home;
+        }
+        let eng = &self.engine;
+        let one = move |n: &Node| view::title_lines(n, &|t: &str, s: f32, w: f32| eng.wrapped_lines(t, s, w));
+        let mut board = std::mem::take(&mut self.board);
+        board.resolve_overlap(id);
+        board.fit_ancestors(id, &one);
+        self.board = board;
+        if let Some(t) = &mut self.trail {
+            t.set_drawn(&self.board, id, bx, f);
+        }
+    }
+
+    /// Text editing of a concept just made.
+    fn edit_new(&mut self, id: String) {
+        self.sel = vec![id.clone()];
+        self.sel_edge = None;
+        self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
+        self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
+        (self.caret, self.anchor) = (0, 0);
+        self.caret_epoch = Instant::now();
+        self.text_undo.clear();
+        self.text_redo.clear();
+    }
+
     /// Double-click on empty canvas (or a parent's empty inside).
     fn create_at(&mut self, p: Pt, parent: Option<String>) {
+        if let Some(cur) = self.trail.as_ref().filter(|t| !t.leaving).map(|t| t.current().to_string()) {
+            if let Some(id) = self.walk_new(&cur, Some(p)) {
+                self.edit_new(id);
+                self.rebuild();
+            }
+            return;
+        }
         let walking = self.trail.is_some();
         let parent = if walking { parent } else { parent.or_else(|| self.board.deepest_at(p.0, p.1, &HashSet::new())) };
         self.begin();
@@ -1881,6 +2032,9 @@ impl Editor {
         self.caret = text.chars().count();
         self.anchor = self.caret;
         self.mode = Mode::Text { target, text, created };
+        self.text_undo.clear();
+        self.text_redo.clear();
+        self.text_last = None;
     }
 
     /// The caret slot nearest the pointer in the text being edited. With
@@ -2009,9 +2163,41 @@ impl Editor {
         self.caret_epoch = Instant::now();
     }
 
+    /// Remembers the text before an edit, one state per word or pause.
+    fn text_mark(&mut self, deleting: bool, s: &str) {
+        let Mode::Text { text, .. } = &self.mode else { return };
+        let fresh = match self.text_last {
+            None => true,
+            Some((at, del)) => at.elapsed().as_millis() > 900 || del != deleting || s.contains(char::is_whitespace),
+        };
+        if fresh && self.text_undo.last().is_none_or(|l| l.0 != *text) {
+            self.text_undo.push((text.clone(), self.caret));
+        }
+        self.text_redo.clear();
+        self.text_last = Some((Instant::now(), deleting));
+    }
+
+    /// Ctrl+Z / Ctrl+Y while typing.
+    fn text_undo_step(&mut self, redo: bool) {
+        let Mode::Text { text, .. } = &self.mode else { return };
+        let now = (text.clone(), self.caret);
+        let Some((t, c)) = (if redo { self.text_redo.pop() } else { self.text_undo.pop() }) else { return };
+        if redo {
+            self.text_undo.push(now);
+        } else {
+            self.text_redo.push(now);
+        }
+        self.text_last = None;
+        self.set_text_raw(&t);
+        self.caret = c.min(t.chars().count());
+        self.anchor = self.caret;
+        self.caret_epoch = Instant::now();
+    }
+
     /// Replaces characters `from..to` of the text being edited with `s` and
     /// puts the caret after it.
     fn replace_range(&mut self, from: usize, to: usize, s: &str) {
+        self.text_mark(s.is_empty(), s);
         let Mode::Text { target, text, .. } = &mut self.mode else { return };
         let byte = |t: &str, k: usize| t.char_indices().nth(k).map_or(t.len(), |(i, _)| i);
         let (bf, bt) = (byte(text, from), byte(text, to));
@@ -2039,6 +2225,16 @@ impl Editor {
 
     /// Replaces the text being edited (a native text field owns the caret).
     pub fn set_text(&mut self, s: &str) {
+        let Mode::Text { text, .. } = &self.mode else { return };
+        if text == s {
+            return;
+        }
+        let deleting = s.chars().count() < text.chars().count();
+        self.text_mark(deleting, if s.ends_with(char::is_whitespace) { " " } else { "" });
+        self.set_text_raw(s);
+    }
+
+    fn set_text_raw(&mut self, s: &str) {
         let Mode::Text { target, text, .. } = &mut self.mode else { return };
         *text = s.to_string();
         self.caret = s.chars().count();
@@ -2133,11 +2329,28 @@ impl Editor {
     /// Ends text editing; a new concept left empty is removed again.
     pub fn commit_text(&mut self) {
         let Mode::Text { target, text, created } = std::mem::replace(&mut self.mode, Mode::Idle) else { return };
-        self.text_box = None;
+        let made = self.text_box.take();
+        self.text_undo.clear();
+        self.text_redo.clear();
+        self.text_last = None;
         if let TextTarget::Node(id) = &target {
             if created && text.trim().is_empty() {
                 self.board.delete(&[id.clone()], false);
                 self.sel.clear();
+            } else if created {
+                // The concept as made, then its text: Ctrl+Z takes back the
+                // text first, the concept with the next one.
+                if let Some(done) = self.board.get(id).cloned() {
+                    if let Some(n) = self.board.get_mut(id) {
+                        n.text.clear();
+                        if let Some((w, h)) = made {
+                            (n.w, n.h) = (w, h);
+                        }
+                    }
+                    self.commit();
+                    self.begin();
+                    *self.board.get_mut(id).unwrap() = done;
+                }
             }
         }
         self.commit();
@@ -2236,6 +2449,11 @@ impl Editor {
             NODE_DELETE => self.delete_selection(false),
             NODE_DELETE_DEEP => self.delete_selection(true),
             NODE_PATH => self.path_enter(),
+            NODE_CLOSE => {
+                if let [one] = &sel[..] {
+                    self.path_close(one);
+                }
+            }
             CANVAS_NEW => {
                 let p = self.menu_at;
                 self.create_at(p, None);
@@ -2250,6 +2468,15 @@ impl Editor {
     pub fn tab_new(&mut self) {
         self.commit_text();
         let [one] = &self.sel[..] else { return };
+        if self.path_active() {
+            let one = one.clone();
+            if let Some(id) = self.walk_new(&one, None) {
+                self.edit_new(id.clone());
+                self.rebuild();
+                self.show(&id);
+            }
+            return;
+        }
         let Some(n) = self.board.get(one).cloned() else { return };
         let parent = self.board.parent(&n.id).map(String::from);
         let p = (n.x + n.w * 1.9, n.y + n.h * 0.5);

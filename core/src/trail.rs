@@ -102,8 +102,17 @@ pub struct Trail {
     /// Whether the current concept's neighbours are shown (a tap on it or
     /// on empty canvas folds them).
     pub expanded: bool,
-    /// Moved by hand or created here: they stay out until the walk ends.
+    /// Stepped into, moved by hand or created here: they stay out until
+    /// the walk ends, whichever way it goes on (or until closed by hand).
     pub touched: HashSet<String>,
+    /// Moved by hand (undoing a step keeps those out).
+    dragged: HashSet<String>,
+    /// Closed by hand: they do not come back as neighbours of the current
+    /// concept until the walk moves on or it is tapped.
+    closed: HashSet<String>,
+    /// Concepts made in the walk, with the concept each was made from:
+    /// their place on the board follows where they are put here.
+    born: HashMap<String, String>,
     pub layout: Layout,
     /// Where concepts are going, relative to their place on the board.
     off: HashMap<String, Pose>,
@@ -193,13 +202,18 @@ fn spot(cb: Bbox, w: f32, h: f32, base: f32, gap: f32, taken: &[Bbox]) -> Bbox {
 }
 
 impl Trail {
-    pub fn new(b: &Board, links: Vec<String>, undo_len: usize, layout: Layout) -> Trail {
+    /// A walk along `links`; `kept` are concepts left out last time, where
+    /// they were.
+    pub fn new(b: &Board, links: Vec<String>, kept: &[(String, Off)], undo_len: usize, layout: Layout) -> Trail {
         let mut t = Trail {
             marks: vec![undo_len; links.len()],
             links,
             open: Vec::new(),
             expanded: true,
-            touched: HashSet::new(),
+            touched: kept.iter().filter(|k| b.get(&k.0).is_some()).map(|k| k.0.clone()).collect(),
+            dragged: HashSet::new(),
+            closed: HashSet::new(),
+            born: HashMap::new(),
             layout,
             off: HashMap::new(),
             shown: HashMap::new(),
@@ -208,9 +222,37 @@ impl Trail {
             known: b.nodes.iter().map(|n| n.id.clone()).collect(),
             leaving: false,
         };
+        for (id, o) in kept {
+            if t.touched.contains(id) {
+                t.off.insert(id.clone(), Pose::at(*o));
+            }
+        }
         t.reopen(b);
         t.relayout(b);
         t
+    }
+
+    /// What stays out besides the path, to bring back on the next walk.
+    pub fn kept(&self) -> Vec<(String, Off)> {
+        self.touched.iter().filter(|id| !self.links.contains(id)).filter_map(|id| self.off.get(id).map(|p| (id.clone(), p.off()))).collect()
+    }
+
+    /// Out concepts that can be closed by hand: everything out but the path.
+    pub fn closable(&self) -> Vec<String> {
+        self.touched.iter().filter(|id| !self.links.contains(id)).cloned().collect()
+    }
+
+    /// Closes `id` by hand: it goes back to its place on the board.
+    pub fn close(&mut self, b: &Board, id: &str) -> bool {
+        if self.links.iter().any(|l| l == id) || !(self.touched.contains(id) || self.open.iter().any(|o| o == id)) {
+            return false;
+        }
+        self.touched.remove(id);
+        self.dragged.remove(id);
+        self.open.retain(|o| o != id);
+        self.closed.insert(id.to_string());
+        self.settle(b);
+        true
     }
 
     pub fn current(&self) -> &str {
@@ -476,7 +518,7 @@ impl Trail {
     /// Opens the current concept's neighbours that are not out yet.
     fn reopen(&mut self, b: &Board) {
         let out = self.out();
-        self.open = neighbors(b, self.current()).into_iter().filter(|n| !out.contains(n)).collect();
+        self.open = neighbors(b, self.current()).into_iter().filter(|n| !out.contains(n) && !self.closed.contains(n)).collect();
         self.expanded = true;
     }
 
@@ -586,6 +628,8 @@ impl Trail {
         self.links.clear();
         self.open.clear();
         self.touched.clear();
+        self.dragged.clear();
+        self.born.clear();
         self.off.clear();
         self.ease();
     }
@@ -607,7 +651,7 @@ impl Trail {
         }
         self.links.push(n.to_string());
         self.marks.push(undo_len);
-        self.touched.remove(n);
+        self.closed.clear();
         self.open.clear();
         self.reopen(b);
         self.settle(b);
@@ -623,24 +667,29 @@ impl Trail {
             }
             return;
         }
+        // The links after it leave the path but stay out where they are:
+        // going another way does not take away what was looked at.
         let gone: Vec<String> = self.links.drain(k + 1..).collect();
         self.marks.truncate(k + 1);
-        // Links that were dragged keep their place; the rest slide back
-        // unless they are neighbours of the link returned to.
-        for g in gone {
-            self.touched.remove(&g);
-        }
+        self.touched.extend(gone);
+        self.closed.clear();
         self.reopen(b);
         self.settle(b);
     }
 
-    /// Ctrl+Z on the walk: the last step back.
+    /// Ctrl+Z on the walk: the last step is undone as if never taken (the
+    /// concept goes back among the neighbours unless it was moved by hand).
     pub fn pop(&mut self, b: &Board) -> bool {
         if self.links.len() < 2 {
             return false;
         }
-        let k = self.links.len() - 2;
-        self.back_to(b, k);
+        let g = self.links.pop().unwrap_or_default();
+        self.marks.pop();
+        if !self.dragged.contains(&g) {
+            self.touched.remove(&g);
+        }
+        self.reopen(b);
+        self.settle(b);
         true
     }
 
@@ -649,6 +698,7 @@ impl Trail {
         if self.expanded && !self.open.is_empty() {
             self.fold(b);
         } else {
+            self.closed.clear();
             self.reopen(b);
             self.settle(b);
         }
@@ -672,10 +722,129 @@ impl Trail {
 
     /// After a drag: it stays out until the walk ends.
     pub fn touch(&mut self, id: &str) {
-        if !self.links.iter().any(|l| l == id) {
-            self.touched.insert(id.to_string());
-        }
+        self.touched.insert(id.to_string());
+        self.dragged.insert(id.to_string());
         self.open.retain(|o| o != id);
+    }
+
+    /// Whether `id` was made in this walk.
+    pub fn born(&self, id: &str) -> bool {
+        self.born.contains_key(id)
+    }
+
+    /// Size `id` takes here: one scale in the flat layouts, its own on the map.
+    fn dims(&self, b: &Board, id: &str) -> (f32, f32, f32) {
+        let n = b.node(id);
+        if self.layout.flat() {
+            let f = self.unit(b);
+            let (w, h) = self.card(b, id, f);
+            (w, h, f)
+        } else {
+            (n.w, n.h, n.font)
+        }
+    }
+
+    /// A concept just made from `anchor`: out and touched, centred at `at`
+    /// or laid out as one more neighbour. Untouched neighbours in its way
+    /// make room (in a tree it joins the column of what follows).
+    pub fn adopt(&mut self, b: &Board, id: &str, anchor: &str, at: Option<(f32, f32)>) {
+        if b.get(id).is_none() {
+            return;
+        }
+        self.known.insert(id.to_string());
+        self.touched.insert(id.to_string());
+        self.born.insert(id.to_string(), anchor.to_string());
+        let (w, h, f) = self.dims(b, id);
+        let cur = self.current().to_string();
+        let tree = matches!(self.layout, Layout::Right | Layout::Down);
+        match at {
+            Some(p) => {
+                // Dropped onto something that stays out: the nearest free
+                // spot away from it (untouched neighbours move instead).
+                let open: HashSet<&String> = self.open.iter().collect();
+                let keep: Vec<String> = self.out().into_iter().filter(|o| o != id && !open.contains(o)).collect();
+                let boxes: Vec<Bbox> = keep.iter().filter_map(|o| self.target_box(b, o)).collect();
+                let mine = [p.0 - w * 0.5, p.1 - h * 0.5, p.0 + w * 0.5, p.1 + h * 0.5];
+                let r = match boxes.iter().find(|o| overlaps(o, &grow(mine, f * 0.5))) {
+                    Some(o) => {
+                        let (ox, oy) = ((o[0] + o[2]) * 0.5, (o[1] + o[3]) * 0.5);
+                        spot(*o, w, h, (p.1 - oy).atan2(p.0 - ox), f * 1.5, &boxes)
+                    }
+                    None => mine,
+                };
+                self.put(b, id, r[0], r[1], w, h, f)
+            }
+            None if tree && anchor == cur => {
+                let mut group: Vec<String> = self.open.iter().filter(|o| outgoing(b, &cur, o)).cloned().collect();
+                for g in &group {
+                    self.off.remove(g);
+                }
+                group.push(id.to_string());
+                self.lay(b, &cur, &group);
+            }
+            None => self.lay(b, anchor, &[id.to_string()]),
+        }
+        if self.layout.flat() {
+            self.fit(b, id);
+        }
+        if let Some(me) = self.target_box(b, id) {
+            let room = grow(me, f);
+            let clash: Vec<String> = self.open.iter().filter(|o| self.target_box(b, o).is_some_and(|ob| overlaps(&ob, &room))).cloned().collect();
+            for c in &clash {
+                self.off.remove(c);
+            }
+            self.lay(b, &cur, &clash);
+            if self.layout.flat() {
+                for c in &clash {
+                    self.fit(b, c);
+                }
+            }
+        }
+        self.ease();
+    }
+
+    /// Where `id` is drawn when done sliding, with its font.
+    pub fn drawn(&self, b: &Board, id: &str) -> Option<(Bbox, f32)> {
+        let n = b.get(id)?;
+        Some((self.target_box(b, id)?, n.font + self.pose_in(&self.off, b, id).df))
+    }
+
+    /// Keeps `id` drawn at `bx` with font `f` after its place on the board
+    /// changed.
+    pub fn set_drawn(&mut self, b: &Board, id: &str, bx: Bbox, f: f32) {
+        let Some(n) = b.get(id) else { return };
+        let p = Pose { dx: bx[0] - n.x, dy: bx[1] - n.y, dw: bx[2] - bx[0] - n.w, dh: bx[3] - bx[1] - n.h, df: f - n.font };
+        self.off.insert(id.to_string(), p);
+        self.shown.insert(id.to_string(), p);
+        self.from.remove(id);
+    }
+
+    /// Board place of a concept made here, from where it is drawn: around
+    /// the concept it came from the same way as here, at that concept's
+    /// scale. Beside its card means beside it on the board, so a big frame
+    /// drawn as a small card does not end up on top of it.
+    /// Returns (x, y, w, h, font).
+    pub fn home_for(&self, b: &Board, id: &str) -> Option<(f32, f32, f32, f32, f32)> {
+        let anchor = self.born.get(id).filter(|a| b.get(a.as_str()).is_some()).cloned().unwrap_or_else(|| self.current().to_string());
+        let a = b.get(&anchor)?;
+        let (ab, af) = self.drawn(b, &anchor)?;
+        let (nb, nf) = self.drawn(b, id)?;
+        let k = (af / a.font.max(1e-3)).max(1e-3);
+        let home = a.bbox();
+        let axis = |v: f32, lo: f32, hi: f32, hlo: f32, hhi: f32| {
+            if v < lo {
+                hlo - (lo - v) / k
+            } else if v > hi {
+                hhi + (v - hi) / k
+            } else {
+                hlo + (v - lo) / (hi - lo).max(1e-3) * (hhi - hlo)
+            }
+        };
+        let (cx, cy) = ((nb[0] + nb[2]) * 0.5, (nb[1] + nb[3]) * 0.5);
+        let (w, h) = ((nb[2] - nb[0]) / k, (nb[3] - nb[1]) / k);
+        let hx = axis(cx, ab[0], ab[2], home[0], home[2]);
+        let hy = axis(cy, ab[1], ab[3], home[1], home[3]);
+        Some((hx - w * 0.5, hy - h * 0.5, w, h, nf / k))
     }
 
     /// Own offset of `id`, if it was moved out itself.
@@ -731,7 +900,7 @@ impl Trail {
         if self.expanded {
             let out = self.out();
             for n in neighbors(b, &cur) {
-                if !out.contains(&n) {
+                if !out.contains(&n) && !self.closed.contains(&n) {
                     self.open.push(n);
                 }
             }
@@ -784,7 +953,7 @@ mod tests {
     #[test]
     fn neighbours_slide_out_on_their_own_side() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         settle_all(&mut t);
         let mut open = t.open.clone();
         open.sort();
@@ -801,7 +970,7 @@ mod tests {
     fn board_never_moves() {
         let b = board();
         let before = b.serialize();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         t.step(&b, "b", 0);
         t.step(&b, "e", 0);
         settle_all(&mut t);
@@ -811,7 +980,7 @@ mod tests {
     #[test]
     fn step_moves_on_and_untouched_go_back() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         t.step(&b, "b", 0);
         settle_all(&mut t);
         assert_eq!(t.links, ["a", "b"]);
@@ -827,7 +996,7 @@ mod tests {
     #[test]
     fn dragged_stays_out_after_step() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         t.drag("d", (500.0, -2000.0));
         t.touch("d");
         t.step(&b, "b", 0);
@@ -838,7 +1007,7 @@ mod tests {
     #[test]
     fn back_and_pop_shorten_the_path() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         t.step(&b, "b", 0);
         t.step(&b, "e", 0);
         assert!(t.pop(&b));
@@ -846,6 +1015,8 @@ mod tests {
         t.back_to(&b, 0);
         assert_eq!(t.links, ["a"]);
         assert!(!t.pop(&b));
+        // Links left by going back stay out; popped ones do not.
+        assert!(t.touched.contains("b") && !t.touched.contains("e"));
         // Tapping a link of the path goes back to it.
         t.step(&b, "b", 0);
         t.step(&b, "a", 0);
@@ -855,7 +1026,7 @@ mod tests {
     #[test]
     fn fold_and_toggle() {
         let b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         t.fold(&b);
         settle_all(&mut t);
         assert!(t.open.is_empty());
@@ -869,7 +1040,7 @@ mod tests {
     #[test]
     fn deleted_leave_new_come_out_beside_current() {
         let mut b = board();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         t.step(&b, "b", 0);
         settle_all(&mut t);
         let bo = t.target_of(&b, "b");
@@ -906,7 +1077,7 @@ mod tests {
         b.add_node(node("x", 5000.0, 0.0));
         b.set_parent("a", Some("p"));
         b.add_edge("a", "x", Kind::Link);
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Map);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Map);
         settle_all(&mut t);
         assert!(t.open.contains(&"p".to_string()));
         assert_eq!(t.own("p"), None);
@@ -924,7 +1095,7 @@ mod tests {
         // b is three times bigger, text and all.
         let n = b.get_mut("b").unwrap();
         (n.w, n.h, n.font) = (300.0, 150.0, 60.0);
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Near);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Near);
         settle_all(&mut t);
         let d = t.display(&b);
         let (na, nb) = (d.node("a"), d.node("b"));
@@ -942,7 +1113,7 @@ mod tests {
         heads(&mut b, "c", "a"); // c -> a: comes before a
         heads(&mut b, "a", "b"); // a -> b: after
         // a - d without heads: after, as a continuation.
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Right);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Right);
         settle_all(&mut t);
         let d = t.display(&b);
         let a = d.node("a").bbox();
@@ -977,7 +1148,7 @@ mod tests {
     #[test]
     fn a_frame_comes_out_as_a_card_and_opens_when_stepped_into() {
         let b = framed();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Near);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Near);
         settle_all(&mut t);
         let d = t.display(&b);
         let p = d.node("p");
@@ -1007,7 +1178,7 @@ mod tests {
     fn layouts_cycle_without_touching_the_board() {
         let b = framed();
         let before = b.serialize();
-        let mut t = Trail::new(&b, vec!["a".into()], 0, Layout::Near);
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Near);
         t.step(&b, "p", 0);
         let mut l = t.layout;
         for _ in 0..4 {
@@ -1023,5 +1194,80 @@ mod tests {
         let d = t.display(&b);
         assert_eq!(d.node("p").w, 4000.0);
         assert_eq!(b.serialize(), before);
+    }
+
+    #[test]
+    fn what_was_looked_at_stays_whichever_way_the_walk_goes() {
+        let b = board();
+        for layout in [Layout::Map, Layout::Near, Layout::Right] {
+            let mut t = Trail::new(&b, vec!["a".into()], &[], 0, layout);
+            t.step(&b, "b", 0);
+            t.step(&b, "e", 0);
+            settle_all(&mut t);
+            let (pb, pe) = (at(&t, &b, "b"), at(&t, &b, "e"));
+            // Back to a (a tap on the first link), then another way.
+            t.back_to(&b, 0);
+            t.step(&b, "c", 0);
+            settle_all(&mut t);
+            assert_eq!(at(&t, &b, "b"), pb, "{layout:?}: b stays where it was");
+            assert_eq!(at(&t, &b, "e"), pe, "{layout:?}: e stays too");
+            assert!(t.bright(&b).contains("e"));
+            // Untouched d slid back home.
+            assert_eq!(at(&t, &b, "d"), (50.0, 3025.0), "{layout:?}");
+            // Closed by hand: home.
+            assert!(t.close(&b, "e"));
+            settle_all(&mut t);
+            assert_eq!(at(&t, &b, "e"), (6050.0, 25.0));
+            assert!(!t.close(&b, "c"), "the current one cannot be closed");
+            // A closed neighbour of the current one stays home too.
+            t.back_to(&b, 0);
+            assert!(t.close(&b, "b"));
+            t.sync(&b);
+            settle_all(&mut t);
+            assert!(!t.out().contains("b"));
+            assert_eq!(at(&t, &b, "b"), (3050.0, 25.0));
+        }
+    }
+
+    #[test]
+    fn kept_come_back_on_the_next_walk() {
+        let b = board();
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Near);
+        t.drag("d", (500.0, -2000.0));
+        t.touch("d");
+        let kept = t.kept();
+        let mut t2 = Trail::new(&b, t.links.clone(), &kept, 0, Layout::Near);
+        settle_all(&mut t2);
+        assert_eq!(t2.target_of(&b, "d"), (500.0, -2000.0));
+    }
+
+    #[test]
+    fn a_concept_made_in_the_walk_lands_beside_its_anchor() {
+        let mut b = framed();
+        let mut t = Trail::new(&b, vec!["a".into()], &[], 0, Layout::Near);
+        t.step(&b, "p", 0);
+        settle_all(&mut t);
+        // Made from the frame p (drawn as a small card), dropped right of it.
+        let (pb, _) = t.drawn(&b, "p").unwrap();
+        b.add_node(node("n", 0.0, 0.0));
+        b.add_edge("p", "n", Kind::Link);
+        let drop = (pb[2] + 150.0, (pb[1] + pb[3]) * 0.5);
+        t.adopt(&b, "n", "p", Some(drop));
+        settle_all(&mut t);
+        let (nb, nf) = t.drawn(&b, "n").unwrap();
+        assert!(((nb[0] + nb[2]) * 0.5 - drop.0).abs() < 1.0, "drawn where dropped");
+        assert_eq!(nf, 20.0);
+        let (x, y, w, _, f) = t.home_for(&b, "n").unwrap();
+        // On the board: right of the whole frame, not on top of it.
+        assert!(x > 9000.0, "x {x}");
+        assert!(y > 0.0 && y < 3000.0, "y {y}");
+        // At the frame's scale: p's title is 80, drawn at 20.
+        assert_eq!(f, 80.0);
+        assert!((w - (nb[2] - nb[0]) * 4.0).abs() < 1.0);
+        // Neighbours that were in the way moved.
+        for o in &t.open {
+            let ob = t.target_box(&b, o).unwrap();
+            assert!(!overlaps(&ob, &nb), "{o} overlaps the new one");
+        }
     }
 }
