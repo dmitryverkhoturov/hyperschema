@@ -30,6 +30,16 @@ static MENU_CLOSED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mu
 
 /// True right after a popup closed: the click that closed it by landing on
 /// the menu button must not open it again.
+/// Where the mouse is now, in client pixels. While a popup menu is open
+/// the window gets no mouse moves, so the last reported spot is stale.
+pub fn cursor_client() -> Option<(f64, f64)> {
+    unsafe {
+        let mut p = POINT::default();
+        GetCursorPos(&mut p).ok()?;
+        ScreenToClient(hwnd(), &mut p).as_bool().then_some((p.x as f64, p.y as f64))
+    }
+}
+
 pub fn menu_just_closed() -> bool {
     MENU_CLOSED.lock().ok().and_then(|g| *g).is_some_and(|t| t.elapsed().as_millis() < 250)
 }

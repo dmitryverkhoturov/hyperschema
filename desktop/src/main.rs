@@ -516,6 +516,13 @@ impl ApplicationHandler for App {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_MENU, VK_SHIFT};
                 let down = |k: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
                 let (alt, shift) = (st.mods.alt_key() || down(VK_MENU), st.mods.shift_key() || down(VK_SHIFT));
+                // After a popup menu the last mouse move is from before it
+                // opened: a press would land where the menu was asked for.
+                if state == ElementState::Pressed && st.script.is_none() && harness().is_none() {
+                    if let Some((x, y)) = chrome::cursor_client() {
+                        st.ed.cursor = Pos { x, y };
+                    }
+                }
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
                         if chrome::part_at(st.ed.cursor.x, st.ed.cursor.y) == Some(chrome::Part::Menu) {
@@ -523,6 +530,8 @@ impl ApplicationHandler for App {
                                 st.commit_text();
                                 st.main_menu();
                             }
+                        } else if chrome::menu_just_closed() {
+                            // The click that closed a menu only closes it.
                         } else if !st.timeline_press() {
                             st.press(alt, shift);
                         }
