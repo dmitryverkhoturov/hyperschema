@@ -313,6 +313,10 @@ impl Live {
         if heads == self.pushed {
             return;
         }
+        // A board nobody has drawn on yet stays on this device.
+        if self.pushed.is_empty() && self.shared.board().nodes.is_empty() {
+            return;
+        }
         let bytes = self.shared.save_after(&self.pushed);
         slog(format!("queue {} bytes", bytes.len()));
         if bytes.is_empty() {

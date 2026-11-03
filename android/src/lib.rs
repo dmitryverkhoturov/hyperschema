@@ -502,6 +502,12 @@ pub extern "system" fn Java_com_hyperschema_app_Native_stats(mut env: JNIEnv, _c
 
 // ------------------------------------------------------------ boards and sync
 
+/// True while the open board has nothing on it.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_blank(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
+    app(h).ed.board.nodes.is_empty() as jboolean
+}
+
 fn config(lib: &Library) -> Option<Config> {
     std::fs::read_to_string(lib.dir.join("sync.json")).ok().and_then(|s| Config::parse(&s))
 }
@@ -598,8 +604,8 @@ pub extern "system" fn Java_com_hyperschema_app_Native_setSync(mut env: JNIEnv, 
     1
 }
 
-/// Boards to pick from: "id\tname\topen" lines, this phone's and the
-/// server's, by name.
+/// Boards to pick from: "id\tname\topen\tfilled" lines, this phone's and
+/// the server's, by name; `filled` is 0 for a board here with nothing on it.
 #[no_mangle]
 pub extern "system" fn Java_com_hyperschema_app_Native_boards(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
     let a = app(h);
@@ -611,7 +617,11 @@ pub extern "system" fn Java_com_hyperschema_app_Native_boards(mut env: JNIEnv, _
     }
     all.sort_by(|x, y| x.1.to_lowercase().cmp(&y.1.to_lowercase()));
     let open = a.live.as_ref().map(|l| l.id.clone());
-    let lines: Vec<String> = all.iter().map(|(id, name)| format!("{id}\t{name}\t{}", (Some(id) == open.as_ref()) as u8)).collect();
+    let filled = |id: &String| match &a.lib {
+        Some(l) if l.exists(id) => l.load(id).map_or(true, |b| !b.board().nodes.is_empty()),
+        _ => true,
+    };
+    let lines: Vec<String> = all.iter().map(|(id, name)| format!("{id}\t{name}\t{}\t{}", (Some(id) == open.as_ref()) as u8, filled(id) as u8)).collect();
     a.fetch_cards();
     out(&mut env, Some(lines.join("\n")))
 }

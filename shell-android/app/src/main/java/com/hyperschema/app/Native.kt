@@ -52,6 +52,7 @@ object Native {
     // Boards and sync (core library.rs): the shell picks, the core keeps.
     external fun setLibrary(h: Long, dir: String)
     external fun syncReady(h: Long): Boolean
+    external fun blank(h: Long): Boolean
     /** Connection string (sync.json contents); false if it is not one. */
     external fun setSync(h: Long, text: String): Boolean
     /** "id	name	open" lines. */

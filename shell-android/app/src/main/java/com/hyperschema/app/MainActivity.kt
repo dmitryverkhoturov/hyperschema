@@ -385,8 +385,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private fun takeText(text: String, name: String) {
         if (text.contains("\"password\"") && text.contains("\"url\"")) {
             if (Native.setSync(handle, text)) {
-                // The server's boards arrive in the background.
-                ui.postDelayed({ if (boardId == null) firstBoard(0) else showTitle() }, 1000)
+                // The server's boards arrive in the background; an empty
+                // board gives way to them.
+                ui.postDelayed({ if (boardId == null || Native.blank(handle)) firstBoard(0, boardId) else showTitle() }, 1000)
             }
             return
         }
@@ -414,6 +415,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         for (f in waiting) f()
         waiting.clear()
         if (boardId == null) firstBoard(0)
+        else if (Native.blank(handle) && Native.syncReady(handle)) firstBoard(0, boardId)
     }
 
     /**
@@ -421,15 +423,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
      * comes in the background; take the board this phone had open in the
      * old file-based version, else the first one; with none, a blank one.
      */
-    private fun firstBoard(tries: Int) {
-        if (boardId != null || handle == 0L) return
-        val rows = Native.boards(handle).split('\n').filter { it.isNotBlank() }.map { it.split('\t') }
+    private fun firstBoard(tries: Int, blank: String? = null) {
+        if (handle == 0L || boardId != blank || (blank != null && !Native.blank(handle))) return
+        val rows = Native.boards(handle).split('\n').filter { it.isNotBlank() }.map { it.split('\t') }.filter { it[0] != blank && (blank == null || it.getOrNull(3) != "0") }
         if (rows.isEmpty() && tries < 15 && Native.syncReady(handle)) {
-            ui.postDelayed({ firstBoard(tries + 1) }, 1000)
+            ui.postDelayed({ firstBoard(tries + 1, blank) }, 1000)
             return
         }
         if (rows.isEmpty()) {
-            newBoard()
+            if (blank == null) newBoard()
             return
         }
         val old = getPreferences(MODE_PRIVATE).getString("last", null)?.let { runCatching { displayName(Uri.parse(it)) }.getOrNull() }
