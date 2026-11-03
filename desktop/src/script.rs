@@ -175,7 +175,15 @@ impl State {
                     note = format!("{} hits", sr.hits.len());
                 }
             },
-            "wait" => std::thread::sleep(std::time::Duration::from_millis(n(1) as u64)),
+            "wait" => {
+                // Sync keeps going while a script waits.
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(n(1) as u64);
+                while std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    self.on_sync();
+                    self.maybe_save();
+                }
+            }
             "wheel" => {
                 let (x, y) = (self.ed.cursor.x, self.ed.cursor.y);
                 self.ed.engine.zoom_at(1.18f64.powf(n(1)), x, y);

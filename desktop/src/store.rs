@@ -1,13 +1,17 @@
-//! Files: our own `.hyperschema` board, saved by itself half a second after
-//! each finished action (no Save button, no question on close), with its
-//! history log next to it. Excalidraw drawings are imported once into a
-//! board beside them and never written to.
+//! Boards: kept in this device's library (`%APPDATA%\Hyperschema\boards`,
+//! one Automerge document each, see core `library.rs`) and synced through
+//! the server when `sync.json` is set up. Saved by itself half a second
+//! after each finished action (no Save button, no question on close).
+//! Files (`.hyperschema`, Excalidraw) are imported once into a new board
+//! and never written to; opening the same file again opens that board.
 
 use hs_core::editor::Mode;
 use crate::State;
-use hs_core::board::{Board, Change};
-use hs_core::history::{hash, History};
+use hs_core::board::Board;
+use hs_core::library::Library;
 use hs_core::scene::{rgba, Align, Label, Line, Rect, Scene, Shape};
+use hs_core::sync::{heads_of, Step};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -16,6 +20,14 @@ const SAVE_DELAY: Duration = Duration::from_millis(500);
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// The library: the real one, or a scratch one for scripted test runs (so
+/// tests never touch real boards or the server).
+pub fn library(test: bool) -> Library {
+    let test = test && std::env::var_os("HS_SYNC").is_none();
+    let dir = if test { std::env::temp_dir().join(format!("hyperschema-test-{}", std::process::id())) } else { crate::data_dir().join("boards") };
+    Library::open(dir, false)
 }
 
 fn is_excalidraw(p: &Path) -> bool {
@@ -34,69 +46,53 @@ pub fn stem(p: &Path) -> String {
     n
 }
 
-/// A board path next to `p` that does not exist yet.
-fn fresh_path(dir: &Path, name: &str) -> PathBuf {
+/// Local date and time for the CLI: "2026-11-03 15:25".
+pub fn when(secs: u64) -> String {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let ft = (secs + 11_644_473_600) * 10_000_000;
+    let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    unsafe {
+        let _ = FileTimeToSystemTime(&ft, &mut utc);
+        let _ = SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute)
+}
+
+/// Which board each imported file became: `imports.json`, path -> id.
+fn imports() -> Value {
+    std::fs::read_to_string(crate::data_dir().join("imports.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}))
+}
+
+fn remember_import(path: &Path, id: &str) {
+    let mut m = imports();
+    m[path.to_string_lossy().to_lowercase()] = json!(id);
+    let _ = std::fs::write(crate::data_dir().join("imports.json"), m.to_string());
+}
+
+/// Where a board's walks are kept: per device, not in the board (two
+/// devices walking the same board would fight over them in sync).
+fn walks_file(id: &str) -> PathBuf {
+    crate::data_dir().join("walks").join(format!("{id}.json"))
+}
+
+/// A name no board of this device has yet.
+fn fresh_name(lib: &Library, name: &str) -> String {
+    let taken: Vec<String> = lib.list().into_iter().map(|x| x.1.to_lowercase()).collect();
     let mut k = 1;
     loop {
-        let n = if k == 1 { format!("{name}.{EXT}") } else { format!("{name} ({k}).{EXT}") };
-        let p = dir.join(n);
-        if !p.exists() {
-            return p;
+        let n = if k == 1 { name.to_string() } else { format!("{name} {k}") };
+        if !taken.contains(&n.to_lowercase()) {
+            return n;
         }
         k += 1;
     }
 }
 
-fn mtime(p: &Path) -> Option<SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
-}
-
-fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("hs-tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// Keeps a copy of a file someone else changed before we overwrite it.
-fn backup(path: &Path) {
-    let dir = crate::data_dir().join("backups");
-    let _ = std::fs::create_dir_all(&dir);
-    let stamp = now_ms() / 1000;
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let _ = std::fs::copy(path, dir.join(format!("{stamp}-{name}")));
-    let mut old: Vec<_> = std::fs::read_dir(&dir).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).collect()).unwrap_or_default();
-    old.sort();
-    for p in old.iter().rev().skip(50) {
-        let _ = std::fs::remove_file(p);
-    }
-}
-
-/// Where a board's walks are kept: per device, not in the board (two
-/// devices walking the same board would fight over them in sync).
-fn walks_file(board: &Path) -> PathBuf {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    board.to_string_lossy().to_lowercase().hash(&mut h);
-    crate::data_dir().join("walks").join(format!("{}-{:016x}.json", stem(board), h.finish()))
-}
-
-pub fn recent() -> Vec<PathBuf> {
-    std::fs::read_to_string(crate::data_dir().join("recent.txt")).unwrap_or_default().lines().map(PathBuf::from).filter(|p| p.exists()).collect()
-}
-
-fn push_recent(p: &Path) {
-    let mut r = recent();
-    r.retain(|x| x != p);
-    r.insert(0, p.to_path_buf());
-    r.truncate(10);
-    let text: Vec<String> = r.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    let _ = std::fs::create_dir_all(crate::data_dir());
-    let _ = std::fs::write(crate::data_dir().join("recent.txt"), text.join("\n"));
-}
-
-/// Browsing history: every device's steps merged, newest last.
+/// Browsing history: every device's changes, oldest first.
 pub struct Timeline {
-    pub steps: Vec<Change>,
+    pub steps: Vec<Step>,
     /// How many steps are applied: steps.len() is "now".
     pub pos: usize,
     pub preview: Option<Board>,
@@ -104,56 +100,77 @@ pub struct Timeline {
 }
 
 impl State {
-    /// Opens a board, or imports an Excalidraw drawing into a board beside it.
+    /// Scripted runs stay off the real library and the server, unless
+    /// HS_SYNC=1 asks to test sync itself (with a test APPDATA).
+    fn test_run(&self) -> bool {
+        (self.script.is_some() || crate::harness().is_some()) && std::env::var_os("HS_SYNC").is_none()
+    }
+
+    /// Opens a file: the board it was imported into, or a new import.
     pub fn open(&mut self, path: &Path) {
-        self.commit_text();
-        self.flush();
-        self.save_walks();
-        let result = if is_excalidraw(path) {
-            let target = path.with_file_name(format!("{}.{EXT}", stem(path)));
-            if target.exists() {
-                self.load(&target)
+        if let Some(id) = imports()[path.to_string_lossy().to_lowercase()].as_str().filter(|id| self.lib.exists(id)).map(String::from) {
+            self.open_board(&id);
+            return;
+        }
+        let result = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| {
+            if is_excalidraw(path) {
+                hs_core::import::from_excalidraw(&text).map(|x| x.0)
             } else {
-                self.import(path, target)
+                Board::parse(&text)
             }
-        } else {
-            self.load(path)
-        };
-        if let Err(e) = result {
-            self.name = format!("не открылось: {e}");
+        });
+        match result {
+            Ok(board) => {
+                let name = fresh_name(&self.lib, &stem(path));
+                match self.lib.create(&name, &board) {
+                    Ok(id) => {
+                        if !self.test_run() {
+                            remember_import(path, &id);
+                        }
+                        self.open_board(&id);
+                    }
+                    Err(e) => self.name = format!("не открылось: {e}"),
+                }
+            }
+            Err(e) => self.name = format!("не открылось: {e}"),
         }
         self.window.request_redraw();
     }
 
-    fn import(&mut self, src: &Path, target: PathBuf) -> Result<(), String> {
-        let text = std::fs::read_to_string(src).map_err(|e| e.to_string())?;
-        let (board, report) = hs_core::import::from_excalidraw(&text)?;
-        crate::dlog(format!("imported {} nodes, {} edges, dropped {} arrows", board.nodes.len(), board.edges.len(), report.dropped_arrows));
-        self.create(&target, board)
+    /// At start: the board open last time; before the library existed, the
+    /// file open last time (imported once).
+    pub fn open_last(&mut self, old_file: Option<PathBuf>) {
+        let last = std::fs::read_to_string(crate::data_dir().join("last-board.txt")).unwrap_or_default();
+        let last = last.trim();
+        if !last.is_empty() && self.lib.exists(last) {
+            let id = last.to_string();
+            self.open_board(&id);
+        } else if let Some(p) = old_file.filter(|p| p.exists()) {
+            self.open(&p);
+        } else if let Some((id, _)) = self.lib.list().into_iter().next() {
+            self.open_board(&id);
+        } else {
+            self.new_board();
+        }
     }
 
-    /// Writes a new board file (with its birth as the first history step) and opens it.
-    fn create(&mut self, target: &Path, board: Board) -> Result<(), String> {
-        let text = board.serialize();
-        write_atomic(target, &text).map_err(|e| e.to_string())?;
-        let mut birth = board.diff(&Board::new().snapshot()).unwrap_or(Change { t: 0, dev: String::new(), nodes: vec![], edges: vec![] });
-        birth.t = now_ms();
-        let _ = History::for_file(target).append(&birth, hash(&text));
-        self.load(target)
-    }
-
-    fn load(&mut self, path: &Path) -> Result<(), String> {
-        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let board = Board::parse(&text)?;
-        let history = History::for_file(path);
-        let _ = history.compact(now_ms());
-        self.ed.undo_stack = history.recent_undo(&text, now_ms());
+    pub fn open_board(&mut self, id: &str) {
+        self.commit_text();
+        self.flush();
+        self.save_walks();
+        let live = match self.lib.load(id) {
+            Ok(l) => l,
+            Err(e) => {
+                self.name = format!("не открылось: {e}");
+                return;
+            }
+        };
+        self.ed.board = live.board();
+        self.ed.undo_stack.clear();
         self.ed.redo_stack.clear();
         self.unsaved.clear();
         self.save_at = None;
         self.ed.step_base = None;
-        self.history = Some(history);
-        self.ed.board = board;
         self.ed.mode = Mode::Idle;
         self.ed.sel.clear();
         self.ed.sel_edge = None;
@@ -163,39 +180,45 @@ impl State {
         self.ed.preview = None;
         self.ed.hidden_nodes.clear();
         self.ed.hidden_edges.clear();
-        self.mtime = mtime(path);
-        self.path = Some(path.to_path_buf());
-        self.name = stem(path);
+        self.remote_waiting = false;
+        self.sync_note = None;
+        self.name = live.name.clone();
         self.window.set_title(&self.name);
-        if self.script.is_none() && crate::harness().is_none() {
-            crate::remember(path);
-            push_recent(path);
+        self.live = Some(live);
+        if !self.test_run() {
+            let _ = std::fs::write(crate::data_dir().join("last-board.txt"), id);
+            if let Some(cfg) = crate::cli::config() {
+                let proxy = self.proxy.clone();
+                self.live.as_mut().unwrap().connect(cfg, move || {
+                    let _ = proxy.send_event(());
+                });
+            }
         }
         self.rebuild();
         self.ed.engine.fit();
         // The walks of this board, the one going on when it closed resumed.
         self.ed.trail = None;
-        let walks = std::fs::read_to_string(walks_file(path)).unwrap_or_default();
+        let walks = std::fs::read_to_string(walks_file(id)).unwrap_or_default();
         self.ed.set_walks_json(&walks);
         self.walks_saved = self.ed.walks_json();
-        Ok(())
+        self.window.request_redraw();
     }
 
     /// Keeps the board's walks on disk when they changed.
     pub fn save_walks(&mut self) {
-        let Some(path) = &self.path else { return };
+        let Some(live) = &self.live else { return };
         let now = self.ed.walks_json();
         if now != self.walks_saved {
-            let f = walks_file(path);
+            let f = walks_file(&live.id);
             let _ = std::fs::create_dir_all(f.parent().unwrap());
-            if write_atomic(&f, &now).is_ok() {
+            if std::fs::write(&f, &now).is_ok() {
                 self.walks_saved = now;
             }
         }
     }
 
     /// Queues a finished step for saving.
-    pub fn record(&mut self, mut c: Change) {
+    pub fn record(&mut self, mut c: hs_core::board::Change) {
         if c.t == 0 {
             c.t = now_ms();
         }
@@ -203,61 +226,102 @@ impl State {
         self.save_at = Some(Instant::now() + SAVE_DELAY);
     }
 
-    /// Saves now if a save is due and nothing is mid-gesture.
+    /// Saves now if a save is due and nothing is mid-gesture; takes in
+    /// changes from other devices that waited for the gesture to end.
     pub fn maybe_save(&mut self) {
-        if self.save_at.is_some_and(|t| Instant::now() >= t) && matches!(self.ed.mode, Mode::Idle) {
+        let idle = matches!(self.ed.mode, Mode::Idle);
+        if self.save_at.is_some_and(|t| Instant::now() >= t) && idle {
             self.flush();
+        }
+        if self.remote_waiting && idle && self.unsaved.is_empty() {
+            self.take_remote();
         }
     }
 
-    /// Writes the board and appends pending steps to the history.
+    /// Writes pending steps into the board's document (and so to the server).
     pub fn flush(&mut self) {
         self.save_at = None;
         if self.unsaved.is_empty() {
             return;
         }
-        let Some(path) = self.path.clone() else { return };
-        let text = self.ed.board.serialize();
-        if path.exists() && mtime(&path) != self.mtime {
-            backup(&path);
-        }
-        if let Err(e) = write_atomic(&path, &text) {
+        let Some(live) = &mut self.live else { return };
+        let steps = std::mem::take(&mut self.unsaved);
+        live.record(&steps);
+        if let Err(e) = live.save() {
             crate::dlog(format!("save failed: {e}"));
-            self.name = format!("{} — не сохраняется: {e}", stem(&path));
+            self.name = format!("{} — не сохраняется: {e}", live.name);
             self.save_at = Some(Instant::now() + Duration::from_secs(5));
-            return;
         }
-        self.mtime = mtime(&path);
-        let h = hash(&text);
-        if let Some(hist) = &self.history {
-            for c in self.unsaved.drain(..) {
-                let _ = hist.append(&c, h);
+    }
+
+    /// Sync woke the window: merge what came, show the connection state.
+    pub fn on_sync(&mut self) {
+        let Some(live) = &mut self.live else { return };
+        let (merged, status) = live.poll();
+        let _ = live.save();
+        if let Some(s) = status {
+            if s != self.sync_note {
+                self.sync_note = s;
+                self.window.request_redraw();
             }
         }
-        self.unsaved.clear();
+        if merged {
+            self.remote_waiting = true;
+            self.maybe_save();
+        }
     }
 
-    /// When the window comes back: pick up a file changed elsewhere (sync).
-    pub fn check_external(&mut self) {
-        let Some(path) = self.path.clone() else { return };
-        if !self.unsaved.is_empty() || !matches!(self.ed.mode, Mode::Idle) || mtime(&path) == self.mtime {
+    /// Shows the board as the document has it now, with other devices'
+    /// changes; the camera, selection and walk stay.
+    fn take_remote(&mut self) {
+        self.remote_waiting = false;
+        let Some(live) = &self.live else { return };
+        if self.timeline.is_some() {
+            self.remote_waiting = true;
             return;
         }
-        let cam = self.ed.engine.cam;
-        if self.load(&path).is_ok() {
-            self.ed.engine.cam = cam;
+        let board = live.board();
+        self.ed.board = board;
+        let b = &self.ed.board;
+        self.ed.sel.retain(|id| b.get(id).is_some());
+        if self.ed.sel_edge.as_ref().is_some_and(|e| b.edge(e).is_none()) {
+            self.ed.sel_edge = None;
+        }
+        self.ed.hover = None;
+        self.rebuild();
+        self.window.request_redraw();
+    }
+
+    /// Boards the server has, for the menu; fetched off the window thread.
+    pub fn fetch_cards(&mut self) {
+        let Some(cfg) = crate::cli::config().filter(|_| !self.test_run()) else { return };
+        let cards = self.cards.clone();
+        std::thread::spawn(move || {
+            if let Ok(list) = hs_core::couch::Couch::new(cfg).boards() {
+                *cards.lock().unwrap() = list.into_iter().map(|b| (b.id, b.name)).collect();
+            }
+        });
+    }
+
+    pub fn new_board(&mut self) {
+        let name = fresh_name(&self.lib, "Новая схема");
+        match self.lib.create(&name, &Board::new()) {
+            Ok(id) => self.open_board(&id),
+            Err(e) => self.name = format!("не создалось: {e}"),
         }
     }
 
-    /// Where a file dialog starts: the folder last picked in one, else the
-    /// open board's folder.
+    pub fn open_dialog(&mut self) {
+        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).add_filter("Схемы", &[EXT, "excalidraw", "md"]).set_title("Открыть файл схемы").pick_file();
+        if let Some(p) = pick {
+            Self::remember_dir(&p);
+            self.open(&p);
+        }
+    }
+
+    /// Where a file dialog starts: the folder last picked in one.
     fn dialog_dir(&self) -> PathBuf {
-        std::fs::read_to_string(crate::data_dir().join("dialog-dir.txt"))
-            .ok()
-            .map(|s| PathBuf::from(s.trim()))
-            .filter(|d| d.is_dir())
-            .or_else(|| self.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
-            .unwrap_or_default()
+        std::fs::read_to_string(crate::data_dir().join("dialog-dir.txt")).ok().map(|s| PathBuf::from(s.trim())).filter(|d| d.is_dir()).unwrap_or_default()
     }
 
     fn remember_dir(picked: &Path) {
@@ -266,29 +330,7 @@ impl State {
         }
     }
 
-    pub fn new_board(&mut self) {
-        let dir = self.dialog_dir();
-        let pick = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("Новая схема.{EXT}")).add_filter("Hyperschema", &[EXT]).set_title("Новая схема").save_file();
-        if let Some(p) = pick {
-            Self::remember_dir(&p);
-            self.flush();
-            if let Err(e) = self.create(&p, Board::new()) {
-                self.name = format!("не создалось: {e}");
-            }
-        }
-    }
-
-    pub fn open_dialog(&mut self) {
-        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).add_filter("Схемы", &[EXT, "excalidraw", "md"]).set_title("Открыть схему").pick_file();
-        if let Some(p) = pick {
-            Self::remember_dir(&p);
-            self.open(&p);
-        }
-    }
-
-    /// Import again on demand, into a new board so nothing is overwritten.
-    /// Adds another board (ours or Excalidraw) to the open one. With
-    /// nothing open, an Excalidraw file becomes a new board next to it.
+    /// Adds another board (ours or Excalidraw) to the open one.
     pub fn import_dialog(&mut self) {
         let pick = rfd::FileDialog::new()
             .set_directory(self.dialog_dir())
@@ -297,12 +339,8 @@ impl State {
             .pick_file();
         let Some(src) = pick else { return };
         Self::remember_dir(&src);
-        if self.path.is_none() {
-            self.flush();
-            let target = fresh_path(src.parent().unwrap_or(Path::new(".")), &stem(&src));
-            if let Err(e) = self.import(&src, target) {
-                self.name = format!("не импортировалось: {e}");
-            }
+        if self.live.is_none() {
+            self.open(&src);
             return;
         }
         self.add_board(&src);
@@ -322,38 +360,45 @@ impl State {
                 self.ed.merge_in(b);
                 self.settle();
             }
-            Err(e) => self.name = format!("{} — не добавилось: {e}", self.path.as_deref().map(stem).unwrap_or_default()),
+            Err(e) => self.name = format!("{} — не добавилось: {e}", self.live.as_ref().map(|l| l.name.clone()).unwrap_or_default()),
         }
     }
 
-    pub fn reveal(&self) {
-        if let Some(p) = &self.path {
-            // Explorer parses its own command line: `/select,"path"` must reach
-            // it as is, while std would quote the whole argument (spaces in
-            // the path) and Explorer then ignores it.
-            use std::os::windows::process::CommandExt;
-            let abs = std::path::absolute(p).unwrap_or_else(|_| p.clone());
-            let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", abs.display())).spawn();
+    /// Writes the open board to a `.hyperschema` file (a copy; the board
+    /// itself stays in the library).
+    pub fn export_dialog(&mut self) {
+        let Some(live) = &self.live else { return };
+        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).set_file_name(format!("{}.{EXT}", live.name)).add_filter("Hyperschema", &[EXT]).set_title("Сохранить копию в файл").save_file();
+        if let Some(p) = pick {
+            Self::remember_dir(&p);
+            let _ = std::fs::write(&p, self.ed.board.serialize());
         }
     }
 
     pub fn main_menu(&mut self) {
         let h = crate::chrome::strip_h();
-        let mut items: Vec<(i32, String, bool)> = vec![(1, "Новая схема…".into(), false), (2, "Открыть…".into(), false)];
-        let rec = recent();
-        if !rec.is_empty() {
-            items.push((-2, "Недавние".into(), false));
-            for (i, p) in rec.iter().enumerate() {
-                items.push((100 + i as i32, stem(p), Some(p) == self.path.as_ref()));
+        let mut items: Vec<(i32, String, bool)> = vec![(1, "Новая схема".into(), false), (2, "Открыть файл…".into(), false)];
+        let mut boards = self.lib.list();
+        for (id, name) in self.cards.lock().unwrap().iter() {
+            if !boards.iter().any(|b| &b.0 == id) {
+                boards.push((id.clone(), name.clone()));
+            }
+        }
+        boards.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        let open_id = self.live.as_ref().map(|l| l.id.clone());
+        if !boards.is_empty() {
+            items.push((-2, "Схемы".into(), false));
+            for (i, (id, name)) in boards.iter().enumerate() {
+                items.push((100 + i as i32, name.clone(), Some(id) == open_id.as_ref()));
             }
             items.push((-1, String::new(), false));
         }
-        items.extend([(3, "Добавить схему…".into(), false), (0, String::new(), false), (4, "Показать в проводнике".into(), false), (5, "История…".into(), false), (0, String::new(), false), (6, "Связи с вложенными".into(), self.ed.show_nested_links)]);
+        items.extend([(3, "Добавить схему…".into(), false), (4, "Сохранить копию в файл…".into(), false), (0, String::new(), false), (5, "История…".into(), false), (0, String::new(), false), (6, "Связи с вложенными".into(), self.ed.show_nested_links)]);
         match crate::chrome::popup(0.0, h, &items) {
             1 => self.new_board(),
             2 => self.open_dialog(),
             3 => self.import_dialog(),
-            4 => self.reveal(),
+            4 => self.export_dialog(),
             5 => self.open_timeline(),
             6 => {
                 self.ed.show_nested_links = !self.ed.show_nested_links;
@@ -361,13 +406,17 @@ impl State {
                 self.ed.rebuild();
             }
             i if i >= 100 => {
-                if let Some(p) = rec.get((i - 100) as usize) {
-                    let p = p.clone();
-                    self.open(&p);
+                if let Some((id, name)) = boards.get((i - 100) as usize).cloned() {
+                    if !self.lib.exists(&id) {
+                        // Known only to the server: the first pull fills it.
+                        let _ = self.lib.adopt(&id, &name);
+                    }
+                    self.open_board(&id);
                 }
             }
             _ => {}
         }
+        self.fetch_cards();
     }
 
     // ------------------------------------------------------------ timeline
@@ -375,7 +424,7 @@ impl State {
     pub fn open_timeline(&mut self) {
         self.commit_text();
         self.flush();
-        let steps = self.history.as_ref().map(|h| h.load_all()).unwrap_or_default();
+        let steps = self.live.as_mut().map(|l| l.shared.steps()).unwrap_or_default();
         let pos = steps.len();
         self.ed.sel.clear();
         self.ed.sel_edge = None;
@@ -401,11 +450,11 @@ impl State {
         if pos == t.steps.len() {
             t.preview = None;
         } else {
-            let mut b = self.ed.board.clone();
-            for c in t.steps[pos..].iter().rev() {
-                b.apply(c, false);
-            }
-            t.preview = Some(b);
+            let heads = heads_of(&t.steps, pos);
+            t.preview = match self.live.as_mut() {
+                Some(l) if !heads.is_empty() => l.shared.board_at(&heads),
+                _ => Some(Board::new()),
+            };
         }
         self.ed.preview = t.preview.clone();
         self.rebuild();
@@ -426,6 +475,15 @@ impl State {
         self.commit();
         self.settle();
         self.rebuild();
+    }
+
+    /// Who made a change, for the timeline.
+    fn who(&self, actor: &str) -> &'static str {
+        if *actor == self.lib.actor.to_hex_string() {
+            "этот компьютер"
+        } else {
+            "другое устройство"
+        }
     }
 
     fn bar(&self) -> (f32, f32, f32, f32) {
@@ -489,7 +547,11 @@ impl State {
         let mut ui = Scene::default();
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let menu_hover = matches!(crate::chrome::part_at(self.ed.cursor.x, self.ed.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
-        crate::chrome::draw(&mut ui, &self.name, menu_hover, ink);
+        let title = match &self.sync_note {
+            Some(_) => format!("{} · нет связи с сервером", self.name),
+            None => self.name.clone(),
+        };
+        crate::chrome::draw(&mut ui, &title, menu_hover, ink);
         let bar = self.ed.path_ui(crate::chrome::strip_h() as f32);
         ui.rects.extend(bar.rects);
         ui.lines.extend(bar.lines);
@@ -538,10 +600,10 @@ impl State {
             let when = if t.pos == t.steps.len() {
                 "сейчас".to_string()
             } else {
-                let at = t.steps.get(t.pos).map_or(0, |c| c.t);
+                let at = t.steps.get(t.pos).map_or(0, |c| c.t.max(0) as u64);
                 ago(now_ms().saturating_sub(at))
             };
-            let dev = if t.pos < t.steps.len() { t.steps.get(t.pos).map(|c| format!(" · {}", c.dev)).unwrap_or_default() } else { String::new() };
+            let dev = if t.pos < t.steps.len() { t.steps.get(t.pos).map(|c| format!(" · {}", self.who(&c.actor))).unwrap_or_default() } else { String::new() };
             ui.labels.push(Label { x: x0, y: y + 10.0 * s, w: x1 - x0, size: 14.0 * s, color: ink, align: Align::Left, wrap: false, text: format!("История: шаг {} из {} — {when}{dev}", t.pos, t.steps.len()) });
             let btn = |ui: &mut Scene, bx: f32, bw: f32, text: &str, primary: bool| {
                 let by = y + bh * 0.5 - 16.0 * s;

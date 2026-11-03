@@ -9,3 +9,6 @@ bytemuck = { version = "1", features = ["derive"] }
 ab_glyph = "0.2"
 lz-str = "0.2"
 serde_json = { version = "1", features = ["preserve_order"] }
+automerge = "0.12"
+base64 = "0.22"
+ureq = { version = "3", features = ["json"] }

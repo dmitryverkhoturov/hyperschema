@@ -9,6 +9,7 @@
 #![windows_subsystem = "windows"]
 
 mod chrome;
+mod cli;
 mod clip;
 mod dm;
 mod edit;
@@ -17,12 +18,11 @@ mod store;
 
 use hs_core::board::Change;
 use hs_core::editor::{Editor, Pos};
-use hs_core::history::History;
 use hs_core::{bench, wgpu, Engine};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -168,11 +168,19 @@ pub struct State {
     cursor_in: bool,
     touchpad_until: Instant,
 
-    path: Option<PathBuf>,
-    /// Modification time of the file when we read or wrote it.
-    mtime: Option<SystemTime>,
+    /// Boards of this device (store.rs).
+    lib: hs_core::library::Library,
+    /// The open board.
+    live: Option<hs_core::library::Live>,
+    /// Wakes the window when sync has news.
+    proxy: winit::event_loop::EventLoopProxy<()>,
+    /// What the title strip says about the server: None = all good.
+    sync_note: Option<String>,
+    /// Changes from another device wait for the current gesture to end.
+    remote_waiting: bool,
+    /// Boards the server has, fetched in the background.
+    cards: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     name: String,
-    history: Option<History>,
     /// Time (GetMessageTime, ms) and place of the last press, for double clicks.
     last_press: Option<(u32, Pos)>,
     unsaved: Vec<Change>,
@@ -326,6 +334,7 @@ impl State {
 struct App {
     args: Args,
     state: Option<State>,
+    proxy: winit::event_loop::EventLoopProxy<()>,
 }
 
 fn window_icon() -> Option<winit::window::Icon> {
@@ -334,6 +343,13 @@ fn window_icon() -> Option<winit::window::Icon> {
 }
 
 impl ApplicationHandler for App {
+    /// Sync has news (store.rs `on_sync`).
+    fn user_event(&mut self, _el: &ActiveEventLoop, _: ()) {
+        if let Some(st) = &mut self.state {
+            st.on_sync();
+        }
+    }
+
     fn new_events(&mut self, el: &ActiveEventLoop, _cause: winit::event::StartCause) {
         self.wake(el);
     }
@@ -401,10 +417,13 @@ impl ApplicationHandler for App {
             mods: ModifiersState::default(),
             cursor_in: false,
             touchpad_until: Instant::now(),
-            path: None,
-            mtime: None,
+            lib: store::library(self.args.script.is_some() || harness().is_some()),
+            live: None,
+            proxy: self.proxy.clone(),
+            sync_note: None,
+            remote_waiting: false,
+            cards: Default::default(),
             name: String::new(),
-            history: None,
             last_press: None,
             unsaved: Vec::new(),
             save_at: None,
@@ -439,8 +458,11 @@ impl ApplicationHandler for App {
             st.ed.engine.fit();
             st.name = format!("тест {n} блоков");
         } else {
-            let path = self.args.file.clone().or_else(last_file).unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEME));
-            st.open(&path);
+            match self.args.file.clone() {
+                Some(p) => st.open(&p),
+                None => st.open_last(last_file().or_else(|| Some(PathBuf::from(DEFAULT_SCHEME)))),
+            }
+            st.fetch_cards();
         }
         if let Some((x, y, sc)) = self.args.cam {
             st.ed.engine.cam.cx = x;
@@ -483,7 +505,6 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => chrome::set_metrics(scale_factor, st.window.inner_size().width),
-            WindowEvent::Focused(true) => st.check_external(),
             WindowEvent::DroppedFile(path) => st.open(&path),
             WindowEvent::ModifiersChanged(m) => st.mods = m.state(),
             WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } if from_touch() => {}
@@ -845,8 +866,12 @@ impl App {
 
 fn main() {
     log_panics();
-    let el = EventLoop::new().expect("event loop");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| cli::COMMANDS.contains(&a.as_str())) {
+        std::process::exit(cli::run(args));
+    }
+    let el = EventLoop::<()>::with_user_event().build().expect("event loop");
     el.set_control_flow(ControlFlow::Wait);
-    let mut app = App { args: parse_args(), state: None };
+    let mut app = App { args: parse_args(), state: None, proxy: el.create_proxy() };
     el.run_app(&mut app).expect("run");
 }
