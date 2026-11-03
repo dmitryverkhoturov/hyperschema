@@ -48,4 +48,19 @@ object Native {
     external fun searchClose(h: Long)
     external fun setTop(h: Long, top: Float)
     external fun pathExit(h: Long): Boolean
+
+    // Boards and sync (core library.rs): the shell picks, the core keeps.
+    external fun setLibrary(h: Long, dir: String)
+    external fun syncReady(h: Long): Boolean
+    /** Connection string (sync.json contents); false if it is not one. */
+    external fun setSync(h: Long, text: String): Boolean
+    /** "id	name	open" lines. */
+    external fun boards(h: Long): String
+    /** Returns the board's name, or null. */
+    external fun openBoard(h: Long, id: String): String?
+    /** New board from a file's text (empty = blank); its id or "!error". */
+    external fun importBoard(h: Long, name: String, text: String): String
+    external fun saveBoard(h: Long): Boolean
+    /** 1: board changed (redraw); 2: server out of reach. */
+    external fun syncPoll(h: Long): Int
 }

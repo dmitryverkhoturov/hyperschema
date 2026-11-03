@@ -13,7 +13,10 @@ use hs_core::board::{Board, Kind, Shape as NShape};
 use hs_core::editor::{Editor, Mode, Pos, Request, PALETTE};
 use hs_core::scene::Scene;
 use hs_core::touch::Touch;
+use hs_core::couch::{Config, Couch};
+use hs_core::library::{Library, Live};
 use hs_core::{wgpu, Engine};
+use std::sync::{Arc, Mutex};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
@@ -32,6 +35,15 @@ struct App {
     dirty: bool,
     held_seen: bool,
     menu: Option<(String, f64, f64)>,
+    /// Boards of this phone (`filesDir/boards`) and the open one.
+    lib: Option<Library>,
+    live: Option<Live>,
+    /// Boards the server has, fetched in the background.
+    cards: Arc<Mutex<Vec<(String, String)>>>,
+    /// Other devices' changes wait for the current gesture to end.
+    remote_waiting: bool,
+    /// What went wrong talking to the server, if anything.
+    offline: Option<String>,
 }
 
 const FONTS: &[&str] = &[
@@ -72,7 +84,10 @@ impl App {
     /// After an editor call: note committed steps, take requests.
     fn settle(&mut self) {
         if !self.ed.done.is_empty() {
-            self.ed.done.clear();
+            let steps = std::mem::take(&mut self.ed.done);
+            if let Some(l) = &mut self.live {
+                l.record(&steps);
+            }
             self.dirty = true;
         }
         if let Some(Request::EdgeMenu { edge, x, y }) = self.ed.request.take() {
@@ -169,6 +184,11 @@ pub extern "system" fn Java_com_hyperschema_app_Native_create(env: JNIEnv, _c: J
         dirty: false,
         held_seen: false,
         menu: None,
+        lib: None,
+        live: None,
+        cards: Default::default(),
+        remote_waiting: false,
+        offline: None,
     };
     Box::into_raw(Box::new(a)) as jlong
 }
@@ -478,4 +498,178 @@ pub extern "system" fn Java_com_hyperschema_app_Native_stats(mut env: JNIEnv, _c
     let links = a.ed.board.edges.iter().filter(|e| e.kind == Kind::Link).count();
     let msg = format!("{} концептов · {} связей", a.ed.board.nodes.len(), links);
     out(&mut env, Some(msg))
+}
+
+// ------------------------------------------------------------ boards and sync
+
+fn config(lib: &Library) -> Option<Config> {
+    std::fs::read_to_string(lib.dir.join("sync.json")).ok().and_then(|s| Config::parse(&s))
+}
+
+impl App {
+    fn fetch_cards(&self) {
+        let Some(cfg) = self.lib.as_ref().and_then(config) else { return };
+        let cards = self.cards.clone();
+        std::thread::spawn(move || {
+            if let Ok(list) = Couch::new(cfg).boards() {
+                *cards.lock().unwrap() = list.into_iter().map(|b| (b.id, b.name)).collect();
+            }
+        });
+    }
+
+    fn open_board(&mut self, id: &str) -> Result<(), String> {
+        let lib = self.lib.as_ref().ok_or("no library")?;
+        if !lib.exists(id) {
+            let name = self.cards.lock().unwrap().iter().find(|c| c.0 == id).map(|c| c.1.clone()).unwrap_or_else(|| id.to_string());
+            lib.adopt(id, &name).map_err(|e| e.to_string())?;
+        }
+        let mut live = lib.load(id)?;
+        if let Some(cfg) = config(lib) {
+            // The shell polls (`syncPoll`) about once a second.
+            live.connect(cfg, || {});
+        }
+        self.ed.load(live.board());
+        self.ed.frozen = false;
+        self.editable = true;
+        self.menu = None;
+        self.remote_waiting = false;
+        self.offline = None;
+        self.live = Some(live);
+        self.ed.engine.fit();
+        Ok(())
+    }
+
+    /// Shows the document's current board (other devices' changes);
+    /// camera, selection, walk and undo stay.
+    fn take_remote(&mut self) {
+        let Some(l) = &self.live else { return };
+        self.remote_waiting = false;
+        // A board opened before anything arrived fits once it fills.
+        let was_empty = self.ed.board.nodes.is_empty();
+        self.ed.board = l.board();
+        let b = &self.ed.board;
+        self.ed.sel.retain(|id| b.get(id).is_some());
+        if self.ed.sel_edge.as_ref().is_some_and(|e| b.edge(e).is_none()) {
+            self.ed.sel_edge = None;
+        }
+        if self.menu.as_ref().is_some_and(|m| b.edge(&m.0).is_none()) {
+            self.menu = None;
+        }
+        self.ed.hover = None;
+        self.ed.rebuild();
+        if was_empty {
+            self.ed.engine.fit();
+        }
+    }
+}
+
+/// Opens the phone's library in `dir` (filesDir/boards).
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setLibrary(mut env: JNIEnv, _c: JClass, h: jlong, dir: JString) {
+    let dir = jstr(&mut env, &dir);
+    let a = app(h);
+    a.lib = Some(Library::open(std::path::PathBuf::from(dir), false));
+    a.fetch_cards();
+}
+
+/// True when the server connection is set up.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_syncReady(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
+    app(h).lib.as_ref().and_then(config).is_some() as jboolean
+}
+
+/// Takes a connection string (the contents of `sync.json`); false if it is
+/// not one. The open board connects right away.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setSync(mut env: JNIEnv, _c: JClass, h: jlong, text: JString) -> jboolean {
+    let text = jstr(&mut env, &text);
+    let a = app(h);
+    let Some(cfg) = Config::parse(text.trim()) else { return 0 };
+    let Some(lib) = &a.lib else { return 0 };
+    if std::fs::write(lib.dir.join("sync.json"), text.trim()).is_err() {
+        return 0;
+    }
+    if let Some(l) = &mut a.live {
+        if !l.connected() {
+            l.connect(cfg, || {});
+        }
+    }
+    a.fetch_cards();
+    1
+}
+
+/// Boards to pick from: "id\tname\topen" lines, this phone's and the
+/// server's, by name.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_boards(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
+    let a = app(h);
+    let mut all = a.lib.as_ref().map(|l| l.list()).unwrap_or_default();
+    for (id, name) in a.cards.lock().unwrap().iter() {
+        if !all.iter().any(|b| &b.0 == id) {
+            all.push((id.clone(), name.clone()));
+        }
+    }
+    all.sort_by(|x, y| x.1.to_lowercase().cmp(&y.1.to_lowercase()));
+    let open = a.live.as_ref().map(|l| l.id.clone());
+    let lines: Vec<String> = all.iter().map(|(id, name)| format!("{id}\t{name}\t{}", (Some(id) == open.as_ref()) as u8)).collect();
+    a.fetch_cards();
+    out(&mut env, Some(lines.join("\n")))
+}
+
+/// Opens a board by id. Returns its name, or null if it did not open.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_openBoard(mut env: JNIEnv, _c: JClass, h: jlong, id: JString) -> jstring {
+    let id = jstr(&mut env, &id);
+    let a = app(h);
+    if let Some(l) = &mut a.live {
+        let _ = l.save();
+    }
+    match a.open_board(&id) {
+        Ok(()) => {
+            let name = a.live.as_ref().map(|l| l.name.clone());
+            out(&mut env, name)
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// A new board from a file's text (ours or Excalidraw; empty = blank),
+/// opened. Returns its id, or "!error".
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_importBoard(mut env: JNIEnv, _c: JClass, h: jlong, name: JString, text: JString) -> jstring {
+    let (name, text) = (jstr(&mut env, &name), jstr(&mut env, &text));
+    let a = app(h);
+    let ours = text.trim_start().starts_with('{') && text.contains("\"hyperschema\"");
+    let board = if text.trim().is_empty() { Ok(Board::new()) } else if ours { Board::parse(&text) } else { hs_core::import::from_excalidraw(&text).map(|x| x.0) };
+    let r = board.and_then(|b| a.lib.as_ref().ok_or("no library".to_string())?.create(&name, &b).map_err(|e| e.to_string()));
+    let r = r.and_then(|id| a.open_board(&id).map(|_| id));
+    out(&mut env, Some(r.unwrap_or_else(|e| format!("!{e}"))))
+}
+
+/// Writes the open board's document to the phone.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_saveBoard(_env: JNIEnv, _c: JClass, h: jlong) -> jboolean {
+    app(h).live.as_mut().map_or(true, |l| l.save().is_ok()) as jboolean
+}
+
+/// Takes in what sync brought. Returns 1 if the board changed (redraw),
+/// plus 2 while the server is out of reach.
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_syncPoll(_env: JNIEnv, _c: JClass, h: jlong) -> jint {
+    let a = app(h);
+    let Some(l) = &mut a.live else { return 0 };
+    let (merged, status) = l.poll();
+    if merged {
+        let _ = l.save();
+        a.remote_waiting = true;
+    }
+    if let Some(s) = status {
+        a.offline = s;
+    }
+    let mut changed = 0;
+    if a.remote_waiting && matches!(a.ed.mode, Mode::Idle) && !a.fingers.held() {
+        a.take_remote();
+        changed = 1;
+    }
+    changed | if a.offline.is_some() { 2 } else { 0 }
 }

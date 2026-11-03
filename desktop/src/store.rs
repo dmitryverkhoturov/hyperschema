@@ -281,6 +281,8 @@ impl State {
             return;
         }
         let board = live.board();
+        // A board opened before anything arrived fits once it fills.
+        let was_empty = self.ed.board.nodes.is_empty();
         self.ed.board = board;
         let b = &self.ed.board;
         self.ed.sel.retain(|id| b.get(id).is_some());
@@ -289,6 +291,9 @@ impl State {
         }
         self.ed.hover = None;
         self.rebuild();
+        if was_empty {
+            self.ed.engine.fit();
+        }
         self.window.request_redraw();
     }
 

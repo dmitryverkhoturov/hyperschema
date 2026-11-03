@@ -41,7 +41,8 @@ import kotlin.math.min
 
 /**
  * Thin shell: the Rust core (shared editor + finger gestures) does the
- * work; this draws a few controls over the canvas and keeps the file.
+ * work; this draws a few controls over the canvas. Boards live in the
+ * core's library (filesDir/boards) and sync through the server.
  *
  * No dialogs: text is typed straight into the concept (a hidden field feeds
  * the keyboard, the engine draws text and caret); a selection or a tapped
@@ -62,13 +63,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private lateinit var field: Field
     private var scheduled = false
     private var dirty = false
-    /** The file's text as we last read or wrote it: tells a sync's change from ours. */
-    private var lastText: String? = null
-    private var pendingText: String? = null
+    /** The open board (core `library.rs`) and its name. */
+    private var boardId: String? = null
+    private var boardName = ""
+    /** The server is out of reach. */
+    private var offline = false
+    /** What waits for the core to start (a file handed in before it). */
+    private val waiting = mutableListOf<() -> Unit>()
+    private val poller = Runnable { pollSync() }
     /** Walks and their layout as last kept in preferences. */
     private var walksSaved = ""
     private var layoutSaved = ""
-    private var uri: Uri? = null
     private val ui = Handler(Looper.getMainLooper())
     private val saver = Runnable { save() }
     private var topInset = 0
@@ -270,9 +275,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         // Debug: --es dbgfile NAME opens filesDir/NAME (emulator tests).
         val dbg = intent?.getStringExtra("dbgfile")
         if (dbg != null) open(Uri.fromFile(java.io.File(filesDir, dbg)))
-        else if (!readIntent(intent)) {
-            getPreferences(MODE_PRIVATE).getString("last", null)?.let { open(Uri.parse(it)) }
-        }
+        else readIntent(intent)
         updateButtons()
     }
 
@@ -316,23 +319,35 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     override fun onPause() {
         super.onPause()
+        ui.removeCallbacks(poller)
         if (ui.hasCallbacks(saver)) {
             ui.removeCallbacks(saver)
             save()
         }
     }
 
-    /** Back from another app (Obsidian syncing, say): pick up a changed file. */
     override fun onResume() {
         super.onResume()
-        val u = uri ?: return
-        if (handle == 0L || ui.hasCallbacks(saver) || !Native.editable(handle)) return
-        val text = readText(u) ?: return
-        if (text == lastText) return
-        if (Native.reload(handle, text)) {
-            lastText = text
-            sync()
+        ui.removeCallbacks(poller)
+        ui.post(poller)
+    }
+
+    /** Takes in other devices' changes about once a second while open. */
+    private fun pollSync() {
+        if (handle != 0L && boardId != null) {
+            val r = Native.syncPoll(handle)
+            val off = r and 2 != 0
+            if (off != offline) {
+                offline = off
+                showTitle()
+            }
+            if (r and 1 != 0) sync()
         }
+        ui.postDelayed(poller, 1000)
+    }
+
+    private fun showTitle() {
+        title.text = if (offline) "$boardName · нет связи" else boardName
     }
 
     private fun readText(u: Uri): String? =
@@ -340,6 +355,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     /** Opens what another app handed us; false if nothing came. */
     private fun readIntent(intent: Intent?): Boolean {
+        if (intent?.action == Intent.ACTION_SEND) {
+            intent.getStringExtra(Intent.EXTRA_TEXT)?.let { t ->
+                whenReady { takeText(t, "Новая схема") }
+                return true
+            }
+        }
         val u: Uri? = when (intent?.action) {
             Intent.ACTION_VIEW -> intent.data
             @Suppress("DEPRECATION")
@@ -353,81 +374,138 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         return false
     }
 
+    /** A file from outside: a connection string, or a board to import. */
     private fun open(u: Uri) {
         val text = readText(u)
         if (text == null) {
             title.text = "не открылось"
             return
         }
-        uri = u
-        lastText = text
-        runCatching { contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-        getPreferences(MODE_PRIVATE).edit().putString("last", u.toString()).apply()
-        title.text = displayName(u)
-        pendingText = text
-        loadPending()
+        val name = displayName(u)
+        whenReady { takeText(text, name) }
+    }
+
+    private fun takeText(text: String, name: String) {
+        if (text.contains("\"password\"") && text.contains("\"url\"")) {
+            if (Native.setSync(handle, text)) {
+                title.text = "Подключено к серверу"
+                // The server's boards arrive in the background; then pick one.
+                ui.postDelayed({ if (boardId == null) pickBoard() else showTitle() }, 2000)
+            } else title.text = "не похоже на строку подключения"
+            return
+        }
+        val id = Native.importBoard(handle, name, text)
+        if (id.startsWith("!")) title.text = "не открылось: ${id.substring(1)}" else opened(id, name)
+    }
+
+    private fun whenReady(f: () -> Unit) {
+        if (handle != 0L) f() else waiting.add(f)
     }
 
     private fun displayName(u: Uri): String {
         val name = runCatching {
             contentResolver.query(u, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
         }.getOrNull() ?: u.lastPathSegment ?: ""
-        return name.removeSuffix(".md").removeSuffix(".excalidraw").removeSuffix(".hyperschema")
+        return name.removeSuffix(".md").removeSuffix(".excalidraw").removeSuffix(".hyperschema").removeSuffix(".json").removeSuffix(".txt")
     }
 
-    private fun loadPending() {
-        val text = pendingText ?: return
-        if (handle == 0L) return
-        pendingText = null
-        val err = Native.load(handle, text)
-        if (err != null) title.text = "не открылось: $err"
-        else if (!Native.editable(handle)) title.text = "${title.text} · только просмотр"
-        // The walks of this board, the one going on when it closed resumed.
+    /** The core is up: open the library and the board open last time. */
+    private fun startLibrary() {
+        Native.setLibrary(handle, java.io.File(filesDir, "boards").path)
+        val last = getPreferences(MODE_PRIVATE).getString("board", null)
+        val name = last?.let { Native.openBoard(handle, it) }
+        if (last != null && name != null) opened(last, name)
+        for (f in waiting) f()
+        waiting.clear()
+        if (boardId == null) {
+            if (Native.syncReady(handle)) ui.postDelayed({ if (boardId == null) pickBoard() }, 1500)
+            else connectDialog()
+        }
+    }
+
+    private fun openBoard(id: String) {
+        save()
+        val name = Native.openBoard(handle, id)
+        if (name == null) title.text = "не открылось" else opened(id, name)
+    }
+
+    /** A board just opened in the core: title, walks, controls. */
+    private fun opened(id: String, name: String) {
+        boardId = id
+        boardName = name
+        offline = false
+        showTitle()
         val prefs = getPreferences(MODE_PRIVATE)
+        prefs.edit().putString("board", id).apply()
         prefs.getString("layout", null)?.let { Native.setLayout(handle, it) }
         layoutSaved = Native.layout(handle)
-        if (err == null) prefs.getString("walks:$uri", null)?.let { Native.setWalks(handle, it) }
+        prefs.getString("walks:$id", null)?.let { Native.setWalks(handle, it) }
         walksSaved = Native.walks(handle)
         sync()
     }
 
     private fun save() {
-        val u = uri ?: return
-        if (handle == 0L || !Native.editable(handle)) return
-        val text = Native.serialize(handle)
-        // Someone else's version (a sync) is about to be overwritten: keep a copy.
-        val disk = readText(u)
-        if (disk != null && lastText != null && disk != lastText) {
-            runCatching {
-                val dir = java.io.File(filesDir, "backups").apply { mkdirs() }
-                java.io.File(dir, "${displayName(u)} ${System.currentTimeMillis()}.hyperschema").writeText(disk)
+        if (handle == 0L || boardId == null) return
+        if (!Native.saveBoard(handle)) title.text = "$boardName · не сохраняется"
+    }
+
+    /** This phone's boards and the server's. */
+    private fun pickBoard() {
+        if (handle == 0L) return
+        val rows = Native.boards(handle).split('\n').filter { it.isNotBlank() }.map { it.split('\t') }
+        val names = rows.map { if (it.getOrNull(2) == "1") "• ${it[1]}" else it[1] } + "Новая схема"
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Схемы")
+            .setItems(names.toTypedArray()) { _, k ->
+                if (k < rows.size) openBoard(rows[k][0]) else newBoard()
             }
+            .show()
+    }
+
+    private fun newBoard() {
+        val names = Native.boards(handle).split('\n').map { it.split('\t').getOrElse(1) { "" } }.toSet()
+        var n = "Новая схема"
+        var k = 2
+        while (n in names) n = "Новая схема ${k++}"
+        takeText("", n)
+    }
+
+    /** Asks for the connection string (the contents of sync.json). */
+    private fun connectDialog() {
+        val input = EditText(this).apply {
+            hint = "{\"url\": …, \"user\": …, \"password\": …}"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            clipboard().primaryClip?.getItemAt(0)?.text?.toString()?.takeIf { it.contains("\"password\"") }?.let { setText(it) }
         }
-        val ok = runCatching { contentResolver.openOutputStream(u, "wt")?.use { it.write(text.toByteArray(Charsets.UTF_8)) } != null }.getOrDefault(false)
-        if (ok) lastText = text
-        if (!ok) title.text = "${displayName(u)} · не сохраняется, откройте через ☰"
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Подключение к серверу")
+            .setMessage("Вставьте строку подключения или откройте присланный файл через «Открыть с помощью → Hyperschema».")
+            .setView(input)
+            .setPositiveButton("Подключить") { _, _ -> takeText(input.text.toString(), "") }
+            .setNegativeButton("Без сервера") { _, _ -> if (boardId == null) pickBoard() }
+            .show()
     }
 
     private fun nestedLinks() = getPreferences(MODE_PRIVATE).getBoolean("nested", false)
 
     private fun showMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
-        m.menu.add(0, 1, 0, "Открыть…")
-        m.menu.add(0, 2, 1, "Новая схема…")
-        m.menu.add(0, 3, 2, "Вписать всё")
-        m.menu.add(0, 4, 3, "Связи с вложенными").isCheckable = true
-        if (clipboard().hasPrimaryClip() && Native.editable(handle)) m.menu.add(0, 5, 4, "Вставить")
+        m.menu.add(0, 1, 0, "Схемы…")
+        m.menu.add(0, 2, 1, "Новая схема")
+        m.menu.add(0, 6, 2, "Открыть файл…")
+        m.menu.add(0, 3, 3, "Вписать всё")
+        m.menu.add(0, 4, 4, "Связи с вложенными").isCheckable = true
+        if (clipboard().hasPrimaryClip() && Native.editable(handle)) m.menu.add(0, 5, 5, "Вставить")
+        m.menu.add(0, 7, 6, "Подключение к серверу…")
         m.menu.findItem(4).isChecked = nestedLinks()
         m.setOnMenuItemClickListener {
             when (it.itemId) {
-                1 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_OPEN)
-                2 -> startActivityForResult(
-                    Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream")
-                        .putExtra(Intent.EXTRA_TITLE, "Новая схема.hyperschema"),
-                    REQ_NEW
-                )
+                1 -> pickBoard()
+                2 -> newBoard()
+                6 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_OPEN)
                 3 -> call { Native.fit(handle) }
                 5 -> paste()
+                7 -> connectDialog()
                 4 -> {
                     val on = !nestedLinks()
                     getPreferences(MODE_PRIVATE).edit().putBoolean("nested", on).apply()
@@ -444,13 +522,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         super.onActivityResult(requestCode, resultCode, data)
         val u = data?.data ?: return
         if (resultCode != RESULT_OK) return
-        when (requestCode) {
-            REQ_OPEN -> open(u)
-            REQ_NEW -> {
-                runCatching { contentResolver.openOutputStream(u, "wt")?.use { it.write(EMPTY.toByteArray()) } }
-                open(u)
-            }
-        }
+        if (requestCode == REQ_OPEN) open(u)
     }
 
     /** Runs a core call, then brings the controls in line with the core. */
@@ -517,7 +589,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     /** Remembers the board's walks and their layout when they changed. */
     private fun keepWalks() {
-        val u = uri ?: return
+        val u = boardId ?: return
         val w = Native.walks(handle)
         val l = Native.layout(handle)
         if (w == walksSaved && l == layoutSaved) return
@@ -743,7 +815,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
                         attached = hnd != 0L
                         if (hnd != 0L && nestedLinks()) Native.setNested(hnd, true)
                         if (hnd != 0L) Native.setTop(hnd, topInset + dp(60f))
-                        loadPending()
+                        if (hnd != 0L) startLibrary()
                         sync()
                     }
                 }.start()
@@ -841,6 +913,5 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             Color.WHITE, Color.parseColor("#e9ecef"), Color.parseColor("#ffc9c9"), Color.parseColor("#ffd8a8"),
             Color.parseColor("#fff3bf"), Color.parseColor("#b2f2bb"), Color.parseColor("#a5d8ff"), Color.parseColor("#d0bfff")
         )
-        const val EMPTY = "{\"hyperschema\":1,\"nodes\":[],\"edges\":[],\"dimensions\":[{\"id\":\"main\",\"name\":\"Основной\",\"nest\":\"contains\"}]}"
     }
 }
