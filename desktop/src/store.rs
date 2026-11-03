@@ -129,10 +129,10 @@ impl State {
                         }
                         self.open_board(&id);
                     }
-                    Err(e) => self.name = format!("не открылось: {e}"),
+                    Err(e) => crate::dlog(format!("open failed: {e}")),
                 }
             }
-            Err(e) => self.name = format!("не открылось: {e}"),
+            Err(e) => crate::dlog(format!("open failed: {e}")),
         }
         self.window.request_redraw();
     }
@@ -161,7 +161,7 @@ impl State {
         let live = match self.lib.load(id) {
             Ok(l) => l,
             Err(e) => {
-                self.name = format!("не открылось: {e}");
+                crate::dlog(format!("open failed: {e}"));
                 return;
             }
         };
@@ -247,10 +247,13 @@ impl State {
         let Some(live) = &mut self.live else { return };
         let steps = std::mem::take(&mut self.unsaved);
         live.record(&steps);
-        if let Err(e) = live.save() {
-            crate::dlog(format!("save failed: {e}"));
-            self.name = format!("{} — не сохраняется: {e}", live.name);
-            self.save_at = Some(Instant::now() + Duration::from_secs(5));
+        match live.save() {
+            Ok(()) => self.name = live.name.clone(),
+            Err(e) => {
+                crate::dlog(format!("save failed: {e}"));
+                self.name = format!("{} · не сохранено", live.name);
+                self.save_at = Some(Instant::now() + Duration::from_secs(5));
+            }
         }
     }
 
@@ -312,7 +315,7 @@ impl State {
         let name = fresh_name(&self.lib, "Новая схема");
         match self.lib.create(&name, &Board::new()) {
             Ok(id) => self.open_board(&id),
-            Err(e) => self.name = format!("не создалось: {e}"),
+            Err(e) => crate::dlog(format!("create failed: {e}")),
         }
     }
 
@@ -365,7 +368,7 @@ impl State {
                 self.ed.merge_in(b);
                 self.settle();
             }
-            Err(e) => self.name = format!("{} — не добавилось: {e}", self.live.as_ref().map(|l| l.name.clone()).unwrap_or_default()),
+            Err(e) => crate::dlog(format!("add failed: {e}")),
         }
     }
 
@@ -553,7 +556,7 @@ impl State {
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let menu_hover = matches!(crate::chrome::part_at(self.ed.cursor.x, self.ed.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
         let title = match &self.sync_note {
-            Some(_) => format!("{} · нет связи с сервером", self.name),
+            Some(_) => format!("{} · офлайн", self.name),
             None => self.name.clone(),
         };
         crate::chrome::draw(&mut ui, &title, menu_hover, ink);

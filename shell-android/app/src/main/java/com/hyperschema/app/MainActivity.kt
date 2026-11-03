@@ -347,7 +347,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     }
 
     private fun showTitle() {
-        title.text = if (offline) "$boardName · нет связи" else boardName
+        title.text = if (offline) "$boardName · офлайн" else boardName
     }
 
     private fun readText(u: Uri): String? =
@@ -377,10 +377,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     /** A file from outside: a connection string, or a board to import. */
     private fun open(u: Uri) {
         val text = readText(u)
-        if (text == null) {
-            title.text = "не открылось"
-            return
-        }
+        if (text == null) return
         val name = displayName(u)
         whenReady { takeText(text, name) }
     }
@@ -388,14 +385,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private fun takeText(text: String, name: String) {
         if (text.contains("\"password\"") && text.contains("\"url\"")) {
             if (Native.setSync(handle, text)) {
-                title.text = "Подключено к серверу"
-                // The server's boards arrive in the background; then pick one.
-                ui.postDelayed({ if (boardId == null) pickBoard() else showTitle() }, 2000)
-            } else title.text = "не похоже на строку подключения"
+                // The server's boards arrive in the background.
+                ui.postDelayed({ if (boardId == null) firstBoard(0) else showTitle() }, 1000)
+            }
             return
         }
         val id = Native.importBoard(handle, name, text)
-        if (id.startsWith("!")) title.text = "не открылось: ${id.substring(1)}" else opened(id, name)
+        if (!id.startsWith("!")) opened(id, name)
     }
 
     private fun whenReady(f: () -> Unit) {
@@ -417,16 +413,34 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         if (last != null && name != null) opened(last, name)
         for (f in waiting) f()
         waiting.clear()
-        if (boardId == null) {
-            if (Native.syncReady(handle)) ui.postDelayed({ if (boardId == null) pickBoard() }, 1500)
-            else connectDialog()
+        if (boardId == null) firstBoard(0)
+    }
+
+    /**
+     * First start: no questions, straight to a board. The server's list
+     * comes in the background; take the board this phone had open in the
+     * old file-based version, else the first one; with none, a blank one.
+     */
+    private fun firstBoard(tries: Int) {
+        if (boardId != null || handle == 0L) return
+        val rows = Native.boards(handle).split('\n').filter { it.isNotBlank() }.map { it.split('\t') }
+        if (rows.isEmpty() && tries < 15 && Native.syncReady(handle)) {
+            ui.postDelayed({ firstBoard(tries + 1) }, 1000)
+            return
         }
+        if (rows.isEmpty()) {
+            newBoard()
+            return
+        }
+        val old = getPreferences(MODE_PRIVATE).getString("last", null)?.let { runCatching { displayName(Uri.parse(it)) }.getOrNull() }
+        val pick = rows.firstOrNull { old != null && it[1].equals(old, ignoreCase = true) } ?: rows[0]
+        openBoard(pick[0])
     }
 
     private fun openBoard(id: String) {
         save()
         val name = Native.openBoard(handle, id)
-        if (name == null) title.text = "не открылось" else opened(id, name)
+        if (name != null) opened(id, name)
     }
 
     /** A board just opened in the core: title, walks, controls. */
@@ -446,7 +460,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     private fun save() {
         if (handle == 0L || boardId == null) return
-        if (!Native.saveBoard(handle)) title.text = "$boardName · не сохраняется"
+        if (!Native.saveBoard(handle)) title.text = "$boardName · не сохранено"
     }
 
     /** This phone's boards and the server's. */
@@ -473,16 +487,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     /** Asks for the connection string (the contents of sync.json). */
     private fun connectDialog() {
         val input = EditText(this).apply {
-            hint = "{\"url\": …, \"user\": …, \"password\": …}"
+            hint = "Строка подключения"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             clipboard().primaryClip?.getItemAt(0)?.text?.toString()?.takeIf { it.contains("\"password\"") }?.let { setText(it) }
         }
         android.app.AlertDialog.Builder(this)
-            .setTitle("Подключение к серверу")
-            .setMessage("Вставьте строку подключения или откройте присланный файл через «Открыть с помощью → Hyperschema».")
+            .setTitle("Сервер синхронизации")
             .setView(input)
-            .setPositiveButton("Подключить") { _, _ -> takeText(input.text.toString(), "") }
-            .setNegativeButton("Без сервера") { _, _ -> if (boardId == null) pickBoard() }
+            .setPositiveButton("Сохранить") { _, _ -> takeText(input.text.toString(), "") }
+            .setNegativeButton("Отмена", null)
             .show()
     }
 
@@ -496,7 +509,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         m.menu.add(0, 3, 3, "Вписать всё")
         m.menu.add(0, 4, 4, "Связи с вложенными").isCheckable = true
         if (clipboard().hasPrimaryClip() && Native.editable(handle)) m.menu.add(0, 5, 5, "Вставить")
-        m.menu.add(0, 7, 6, "Подключение к серверу…")
+        m.menu.add(0, 7, 6, "Сервер синхронизации…")
         m.menu.findItem(4).isChecked = nestedLinks()
         m.setOnMenuItemClickListener {
             when (it.itemId) {
