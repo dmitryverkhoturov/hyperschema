@@ -575,7 +575,8 @@ impl Editor {
         self.slide_into(board, &mut ov);
         self.walk_into(board, &mut ov);
         // Live elements.
-        for id in board.draw_order() {
+        let order = if self.hidden_nodes.is_empty() { Vec::new() } else { board.draw_order() };
+        for id in order {
             if self.hidden_nodes.contains(&id) {
                 view::node_into(&board, board.node(&id), &m, &mut ov);
             }
