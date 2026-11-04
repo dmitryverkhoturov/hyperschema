@@ -123,7 +123,7 @@ impl State {
         }
         self.save_walks();
         // Test runs keep the user's remembered arrows and layout.
-        let real = self.script.is_none() && crate::harness().is_none();
+        let real = !crate::dev_run();
         if real && self.ed.layout != self.layout_saved {
             self.layout_saved = self.ed.layout;
             let _ = std::fs::write(crate::data_dir().join("path-layout.txt"), self.ed.layout.key());

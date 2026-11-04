@@ -108,6 +108,14 @@ pub fn harness() -> Option<String> {
     std::env::var("HS_SHOT").ok()
 }
 
+static DEV_RUN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// A run for testing, a screenshot or a benchmark: boards it opens go to a
+/// throwaway library, nothing of the user's is touched.
+pub fn dev_run() -> bool {
+    (*DEV_RUN.get().unwrap_or(&false) || harness().is_some()) && std::env::var_os("HS_SYNC").is_none()
+}
+
 /// Debug trace into %APPDATA%\Hyperschema\debug.log when HS_DEBUG is set.
 pub fn dlog(msg: String) {
     if std::env::var_os("HS_DEBUG").is_some() {
@@ -417,7 +425,7 @@ impl ApplicationHandler for App {
             mods: ModifiersState::default(),
             cursor_in: false,
             touchpad_until: Instant::now(),
-            lib: store::library(self.args.script.is_some() || harness().is_some()),
+            lib: store::library(dev_run()),
             live: None,
             proxy: self.proxy.clone(),
             sync_note: None,
@@ -872,6 +880,8 @@ fn main() {
     }
     let el = EventLoop::<()>::with_user_event().build().expect("event loop");
     el.set_control_flow(ControlFlow::Wait);
-    let mut app = App { args: parse_args(), state: None, proxy: el.create_proxy() };
+    let args = parse_args();
+    let _ = DEV_RUN.set(args.script.is_some() || args.shot.is_some() || args.autobench || args.bench.is_some());
+    let mut app = App { args, state: None, proxy: el.create_proxy() };
     el.run_app(&mut app).expect("run");
 }

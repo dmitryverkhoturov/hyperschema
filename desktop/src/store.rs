@@ -25,7 +25,6 @@ pub fn now_ms() -> u64 {
 /// The library: the real one, or a scratch one for scripted test runs (so
 /// tests never touch real boards or the server).
 pub fn library(test: bool) -> Library {
-    let test = test && std::env::var_os("HS_SYNC").is_none();
     let dir = if test { std::env::temp_dir().join(format!("hyperschema-test-{}", std::process::id())) } else { crate::data_dir().join("boards") };
     Library::open(dir, false)
 }
@@ -103,7 +102,7 @@ impl State {
     /// Scripted runs stay off the real library and the server, unless
     /// HS_SYNC=1 asks to test sync itself (with a test APPDATA).
     fn test_run(&self) -> bool {
-        (self.script.is_some() || crate::harness().is_some()) && std::env::var_os("HS_SYNC").is_none()
+        crate::dev_run()
     }
 
     /// Opens a file: the board it was imported into, or a new import.
@@ -206,7 +205,7 @@ impl State {
 
     /// Keeps the board's walks on disk when they changed.
     pub fn save_walks(&mut self) {
-        let Some(live) = &self.live else { return };
+        let Some(live) = self.live.as_ref().filter(|_| !crate::dev_run()) else { return };
         let now = self.ed.walks_json();
         if now != self.walks_saved {
             let f = walks_file(&live.id);
