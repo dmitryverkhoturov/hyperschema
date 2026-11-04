@@ -621,7 +621,64 @@ impl State {
             btn(&mut ui, w - 280.0 * s, 130.0 * s, "Восстановить", t.preview.is_some());
             btn(&mut ui, w - 140.0 * s, 116.0 * s, "Закрыть", false);
         }
+        self.demo_layer(&mut ui);
         self.ed.engine.set_ui(&ui);
+    }
+
+    /// Demo videos only: the scripted pointer and press ring, the HUD.
+    fn demo_layer(&self, ui: &mut Scene) {
+        let s = self.window.scale_factor() as f32;
+        if self.pointer {
+            let (x, y) = (self.ed.cursor.x as f32, self.ed.cursor.y as f32);
+            if let Some((px, py, t)) = self.pressed_at {
+                let k = t.elapsed().as_secs_f32() / 0.5;
+                if k < 1.0 {
+                    let r = (10.0 + 22.0 * k) * s;
+                    let a = (150.0 * (1.0 - k)) as u8;
+                    ui.rects.push(Rect { x: px as f32 - r, y: py as f32 - r, w: 2.0 * r, h: 2.0 * r, fill: rgba(230, 60, 60, a / 3), stroke: rgba(230, 60, 60, a), stroke_w: 2.0 * s, radius: 0.0, shape: Shape::Ellipse });
+                }
+            }
+            let r = 7.0 * s;
+            ui.rects.push(Rect { x: x - r, y: y - r, w: 2.0 * r, h: 2.0 * r, fill: rgba(40, 40, 40, 200), stroke: rgba(255, 255, 255, 255), stroke_w: 2.0 * s, radius: 0.0, shape: Shape::Ellipse });
+        }
+        if !self.caption.is_empty() {
+            let size = 22.0 * s;
+            let (w, h) = self.ed.engine.size();
+            let tw = size * 0.55 * self.caption.chars().count() as f32 + size * 1.6;
+            let (x, y) = ((w as f32 - tw) * 0.5, h as f32 - 34.0 * s - size * 1.9);
+            ui.rects.push(Rect { x, y, w: tw, h: size * 1.9, fill: rgba(30, 30, 30, 215), stroke: 0, stroke_w: 0.0, radius: size * 0.5, shape: Shape::Rect });
+            ui.labels.push(Label { x, y: y + size * 0.3, w: tw, size, color: rgba(255, 255, 255, 255), align: Align::Center, wrap: false, text: self.caption.clone() });
+        }
+        if self.hud {
+            let b = &self.ed.board;
+            let links = b.edges.iter().filter(|e| e.kind == hs_core::board::Kind::Link).count();
+            let fps = self.auto.as_ref().map(|a| {
+                let n = a.intervals.len().min(30);
+                let avg = a.intervals[a.intervals.len() - n..].iter().sum::<f32>() / n.max(1) as f32;
+                if n == 0 { 0.0 } else { 1000.0 / avg }
+            });
+            let sep = |n: usize| {
+                let d = n.to_string();
+                let mut o = String::new();
+                for (i, c) in d.chars().enumerate() {
+                    if i > 0 && (d.len() - i) % 3 == 0 {
+                        o.push(' ');
+                    }
+                    o.push(c);
+                }
+                o
+            };
+            let mut text = format!("{} concepts · {} links", sep(b.nodes.len()), sep(links));
+            if let Some(f) = fps.filter(|f| *f > 0.0) {
+                text.push_str(&format!(" · {f:.0} fps"));
+            }
+            let size = 15.0 * s;
+            let (_, h) = self.ed.engine.size();
+            let w = size * 0.56 * text.chars().count() as f32 + size * 1.4;
+            let (x, y) = (14.0 * s, h as f32 - 14.0 * s - size * 1.9);
+            ui.rects.push(Rect { x, y, w, h: size * 1.9, fill: rgba(255, 255, 255, 235), stroke: rgba(0, 0, 0, 40), stroke_w: 1.0 * s, radius: 8.0 * s, shape: Shape::Rect });
+            ui.labels.push(Label { x, y: y + size * 0.3, w, size, color: rgba(0x2a, 0x2a, 0x2a, 255), align: Align::Center, wrap: false, text });
+        }
     }
 }
 

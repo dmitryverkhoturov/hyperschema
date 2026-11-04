@@ -8,3 +8,4 @@ shell-android/app/build/
 shell-android/build/
 shell-android/local.properties
 roundtrip-out.md
+!docs/**/*.png

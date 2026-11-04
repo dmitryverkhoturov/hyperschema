@@ -243,15 +243,25 @@ pub fn route_all(board: &Board, nested: bool) -> HashMap<String, Vec<Pt>> {
 /// again; the rest come from `prev`.
 pub fn raw_routes(board: &Board, nested: bool, only: Option<&HashSet<String>>, prev: &HashMap<String, Vec<Pt>>) -> HashMap<String, Vec<Pt>> {
     let mut out = HashMap::new();
+    let mut todo: Vec<(&str, &Node, &Node)> = Vec::new();
     for e in board.edges.iter().filter(|e| shown(board, e, nested)) {
         let (Some(a), Some(b)) = (board.get(&e.from), board.get(&e.to)) else { continue };
         let keep = only.is_some_and(|o| !o.contains(&e.id));
-        let path = match prev.get(&e.id) {
-            Some(p) if keep => p.clone(),
-            _ => route_between(board, a, b),
-        };
-        out.insert(e.id.clone(), path);
+        match prev.get(&e.id) {
+            Some(p) if keep => {
+                out.insert(e.id.clone(), p.clone());
+            }
+            _ => todo.push((&e.id, a, b)),
+        }
     }
+    // Many at once (opening a big board): spread over the cores.
+    let threads = if todo.len() < 256 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()) };
+    let chunk = todo.len().div_ceil(threads).max(1);
+    let done: Vec<Vec<(String, Vec<Pt>)>> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = todo.chunks(chunk).map(|part| sc.spawn(move || part.iter().map(|(id, a, b)| (id.to_string(), route_between(board, a, b))).collect())).collect();
+        jobs.into_iter().map(|j| j.join().unwrap_or_default()).collect()
+    });
+    out.extend(done.into_iter().flatten());
     out
 }
 
@@ -297,12 +307,16 @@ fn separate(paths: &mut [Vec<Pt>], gaps: &[f32], ends: &[(Bbox, Bbox)]) {
     for (i, p) in paths.iter().enumerate() {
         let class = gaps[i].max(1e-3).log2().floor() as i32;
         for c in [class, class + 1] {
-            let cell = 2f32.powi(c + 1) * 64.0;
+            let cell = 2f32.powi(c + 1) * 16.0;
             for k in 0..p.len().saturating_sub(1) {
                 let (a, b) = (p[k], p[k + 1]);
+                // Bits of rounded corners are too short to run along anything.
+                if dist(a, b) < gaps[i] {
+                    continue;
+                }
                 let (x0, x1) = ((a.0.min(b.0) / cell).floor() as i32, (a.0.max(b.0) / cell).floor() as i32);
                 let (y0, y1) = ((a.1.min(b.1) / cell).floor() as i32, (a.1.max(b.1) / cell).floor() as i32);
-                if (x1 as i64 - x0 as i64 + 1) * (y1 as i64 - y0 as i64 + 1) > 4096 {
+                if (x1 as i64 - x0 as i64 + 1) * (y1 as i64 - y0 as i64 + 1) > 1024 {
                     continue;
                 }
                 for gx in x0..=x1 {

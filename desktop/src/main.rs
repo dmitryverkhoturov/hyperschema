@@ -3,7 +3,7 @@
 //! the shell, editing in edit.rs, files and history in store.rs.
 //!
 //! Usage: hyperschema [file.hyperschema | file.excalidraw(.md)]
-//! Dev:   --bench N | --autobench | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
+//! Dev:   --bench N | --autobench | --tour [--hud] (file: camera tour, stats, exit) | --pointer (with --script) | --fullscreen | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
 //!        --script steps.txt (see script.rs)
 
 #![windows_subsystem = "windows"]
@@ -14,6 +14,7 @@ mod clip;
 mod dm;
 mod edit;
 mod script;
+mod tour;
 mod store;
 
 use hs_core::board::Change;
@@ -32,12 +33,15 @@ use hs_core::editor::Mode;
 use hs_core::touch::Touch;
 use winit::window::{Window, WindowId};
 
-const DEFAULT_SCHEME: &str = "board.excalidraw.md";
 
 struct Args {
     bench: Option<usize>,
     file: Option<PathBuf>,
     autobench: bool,
+    tour: bool,
+    hud: bool,
+    pointer: bool,
+    fullscreen: bool,
     vsync: bool,
     high_perf: bool,
     shot: Option<String>,
@@ -48,12 +52,16 @@ struct Args {
 fn parse_args() -> Args {
     // The discrete GPU by default: the 2016 Intel OpenGL driver on this
     // laptop crashes (access violation in ig75icd64.dll).
-    let mut a = Args { bench: None, file: None, autobench: false, vsync: false, high_perf: true, shot: None, script: None, cam: None };
+    let mut a = Args { bench: None, file: None, autobench: false, tour: false, hud: false, pointer: false, fullscreen: false, vsync: false, high_perf: true, shot: None, script: None, cam: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
             "--bench" => a.bench = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or(500_000)),
             "--autobench" => a.autobench = true,
+            "--tour" => a.tour = true,
+            "--hud" => a.hud = true,
+            "--pointer" => a.pointer = true,
+            "--fullscreen" => a.fullscreen = true,
             "--vsync" => a.vsync = true,
             "--gpu" => a.high_perf = it.next().as_deref() != Some("low"),
             "--shot" => a.shot = it.next(),
@@ -158,6 +166,7 @@ struct AutoBench {
     cpu: Vec<f32>,
     text: Vec<f32>,
     rows: Vec<String>,
+    tour: Option<tour::Tour>,
 }
 
 const BENCH_SECS: f64 = 12.0;
@@ -198,6 +207,14 @@ pub struct State {
     script: Option<script::Script>,
     /// Answer the next popup menu gets in a scripted run.
     script_choice: Option<i32>,
+    /// Demo videos (`--pointer`): a pointer drawn where the script points,
+    /// a ring where it pressed.
+    pointer: bool,
+    pressed_at: Option<(f64, f64, Instant)>,
+    /// Script `caption TEXT`: a subtitle for demo videos.
+    caption: String,
+    /// `--hud`: concepts, links and frame rate in a corner.
+    hud: bool,
     auto: Option<AutoBench>,
     frame_interval: Duration,
     last_frame: Instant,
@@ -264,12 +281,28 @@ impl State {
     fn start_bench(&mut self) {
         self.ed.engine.fit();
         let c = self.ed.engine.cam;
-        self.auto = Some(AutoBench { start: Instant::now(), from: (c.cx, c.cy, c.s), last: None, intervals: Vec::new(), cpu: Vec::new(), text: Vec::new(), rows: Vec::new() });
+        self.auto = Some(AutoBench { start: Instant::now(), from: (c.cx, c.cy, c.s), last: None, intervals: Vec::new(), cpu: Vec::new(), text: Vec::new(), rows: Vec::new(), tour: None });
+    }
+
+    fn start_tour(&mut self) {
+        let (w, h) = self.ed.engine.size();
+        let t = tour::Tour::plan(&self.ed.board, w, h, 3);
+        self.start_bench();
+        if let Some(b) = &mut self.auto {
+            b.tour = Some(t);
+        }
     }
 
     /// Advances the scripted camera; returns false when done.
     fn step_bench(&mut self) -> bool {
         let Some(b) = &mut self.auto else { return false };
+        if let Some(tour) = &b.tour {
+            let (w, _) = self.ed.engine.size();
+            let Some((x, y, s)) = tour.camera(w) else { return false };
+            let cam = &mut self.ed.engine.cam;
+            (cam.cx, cam.cy, cam.s) = (x, y, s);
+            return true;
+        }
         let t = b.start.elapsed().as_secs_f64();
         let (cx, cy, s0) = b.from;
         let deep = 1.5f64;
@@ -438,6 +471,10 @@ impl ApplicationHandler for App {
             timeline: None,
             script: self.args.script.as_deref().map(script::Script::load),
             script_choice: None,
+            pointer: self.args.pointer,
+            pressed_at: None,
+            caption: String::new(),
+            hud: self.args.hud,
             auto: None,
             frame_interval,
             last_frame: Instant::now() - Duration::from_secs(1),
@@ -465,10 +502,21 @@ impl ApplicationHandler for App {
             st.ed.engine.set_scene(bench::generate(n));
             st.ed.engine.fit();
             st.name = format!("тест {n} блоков");
+        } else if self.args.tour {
+            // Straight from the file: no library, nothing saved.
+            let p = self.args.file.clone().unwrap_or_default();
+            if let Ok(b) = std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| hs_core::board::Board::parse(&t)) {
+                let t0 = Instant::now();
+                st.ed.board = b;
+                st.ed.rebuild();
+                st.ed.engine.fit();
+                st.name = store::stem(&p);
+                crate::dlog(format!("tour: board built in {:?}", t0.elapsed()));
+            }
         } else {
             match self.args.file.clone() {
                 Some(p) => st.open(&p),
-                None => st.open_last(last_file().or_else(|| Some(PathBuf::from(DEFAULT_SCHEME)))),
+                None => st.open_last(last_file()),
             }
             st.fetch_cards();
         }
@@ -485,6 +533,15 @@ impl ApplicationHandler for App {
         }
         if self.args.autobench {
             st.start_bench();
+        }
+        if self.args.fullscreen {
+            st.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            let sz = st.window.inner_size();
+            st.ed.engine.resize(sz.width, sz.height);
+            st.ed.engine.fit();
+        }
+        if self.args.tour {
+            st.start_tour();
         }
         st.window.request_redraw();
         self.state = Some(st);
@@ -810,7 +867,7 @@ impl ApplicationHandler for App {
                 let benching = st.step_bench();
                 if !benching && st.auto.is_some() {
                     st.finish_bench();
-                    if self.args.autobench {
+                    if self.args.autobench || self.args.tour {
                         el.exit();
                         return;
                     }
@@ -881,7 +938,7 @@ fn main() {
     let el = EventLoop::<()>::with_user_event().build().expect("event loop");
     el.set_control_flow(ControlFlow::Wait);
     let args = parse_args();
-    let _ = DEV_RUN.set(args.script.is_some() || args.shot.is_some() || args.autobench || args.bench.is_some());
+    let _ = DEV_RUN.set(args.script.is_some() || args.shot.is_some() || args.autobench || args.tour || args.bench.is_some());
     let mut app = App { args, state: None, proxy: el.create_proxy() };
     el.run_app(&mut app).expect("run");
 }

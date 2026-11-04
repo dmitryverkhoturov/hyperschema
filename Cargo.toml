@@ -8,6 +8,13 @@ debug = "line-tables-only"
 lto = false
 incremental = true
 
+# Builds to publish and to measure with: whole-program optimised.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+incremental = false
+codegen-units = 1
+
 [profile.dev]
 opt-level = 1
 [profile.dev.package."*"]

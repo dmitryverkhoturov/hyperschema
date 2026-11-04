@@ -1,0 +1,65 @@
+# Path mode demo, recorded for the README. Run on a copy of the board:
+#   hyperschema walk-copy.hyperschema --script walk-demo.txt --pointer
+fit
+pause 1800
+caption Select a note and press Path: what it is linked to comes out
+tap Clean up
+pause 600
+key path
+settle
+pause 1600
+caption Step to a neighbour, and on
+tap No secrets in history
+settle
+pause 1400
+tap Scan every commit
+settle
+pause 1800
+caption Esc: everything slides home
+key esc
+settle
+pause 1500
+caption Another walk, from the root
+tap Put Hyperschema on GitHub
+pause 600
+key path
+settle
+pause 1600
+tap README
+settle
+pause 1300
+tap Two videos
+settle
+pause 1300
+tap Walking the paths
+settle
+pause 1800
+caption Back to the start: what you looked at stays out
+tap Put Hyperschema on GitHub
+settle
+pause 1500
+tap Benchmarks
+settle
+pause 1800
+key esc
+settle
+pause 1200
+caption Path on the root again: the same walk comes back
+tap Put Hyperschema on GitHub
+pause 600
+key path
+settle
+pause 2600
+key esc
+settle
+pause 1000
+caption And "Clean up" opens into its own walk
+tap Clean up
+pause 600
+key path
+settle
+pause 2600
+key esc
+settle
+caption
+pause 1500

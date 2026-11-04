@@ -7,7 +7,7 @@
 //! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
 //! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group|path
 //! key left|right|up|down|home|end|del|selall|copy|cut|paste|dup|tab [shift] [ctrl]
-//! tap TEXT (click the middle of the concept with this text) | pause MS (keeps drawing) | settle (until nothing slides)
+//! tap TEXT (click the middle of the concept with this text; with --pointer the pointer glides there) | pause MS (keeps drawing) | caption TEXT (subtitle; none clears) | settle (until nothing slides)
 //! find TEXT|next|prev|close | wait MS | choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
 //! timeline open|seek N|restore|close | shot out.png | state | tree | quit
 //! (# starts a comment)
@@ -70,6 +70,7 @@ impl State {
         match w.first().copied().unwrap_or("") {
             "move" => self.move_to(PhysicalPosition::new(n(1), n(2))),
             "down" => {
+                self.pressed_at = Some((self.ed.cursor.x, self.ed.cursor.y, std::time::Instant::now()));
                 if has("shift") {
                     self.mods = ModifiersState::SHIFT;
                 }
@@ -197,6 +198,7 @@ impl State {
                     self.maybe_save();
                 }
             }
+            "caption" => self.caption = line.splitn(2, ' ').nth(1).unwrap_or("").trim().to_string(),
             "pause" => self.script.as_mut().unwrap().until = Some(std::time::Instant::now() + std::time::Duration::from_millis(n(1) as u64)),
             "settle" => self.script.as_mut().unwrap().settling = true,
             "tap" => {
@@ -212,7 +214,15 @@ impl State {
                         let (w, h) = self.ed.engine.size();
                         let (x, y) = ((cx as f64 - cam.cx) * cam.s + w as f64 * 0.5, (cy as f64 - cam.cy) * cam.s + h as f64 * 0.5);
                         self.last_press = None;
-                        queue = vec![format!("move {x} {y}"), "down".into(), "up".into()];
+                        // The pointer glides there (seen in demo videos), then clicks.
+                        let (x0, y0) = (self.ed.cursor.x, self.ed.cursor.y);
+                        let steps = if self.pointer { 22 } else { 1 };
+                        for k in 1..=steps {
+                            let t = k as f64 / steps as f64;
+                            let e = t * t * (3.0 - 2.0 * t);
+                            queue.push(format!("move {} {}", x0 + (x - x0) * e, y0 + (y - y0) * e));
+                        }
+                        queue.extend(["down".to_string(), "up".to_string()]);
                     }
                     None => note = "no such concept".into(),
                 }

@@ -1,0 +1,792 @@
+{
+ "hyperschema": 1,
+ "nodes": [
+  {
+   "id": "w000",
+   "type": "text",
+   "x": -204.0,
+   "y": -64.6,
+   "width": 408,
+   "height": 129.2,
+   "text": "Put Hyperschema on GitHub",
+   "fontSize": 34,
+   "fill": "#ffec99"
+  },
+  {
+   "id": "w001",
+   "type": "text",
+   "x": 277.1,
+   "y": -203.2,
+   "width": 182,
+   "height": 66.3,
+   "text": "README",
+   "fontSize": 26,
+   "fill": "#a5d8ff"
+  },
+  {
+   "id": "w002",
+   "type": "text",
+   "x": -42.4,
+   "y": -676.4,
+   "width": 252,
+   "height": 79.8,
+   "text": "What it is, in one line",
+   "fontSize": 21,
+   "fill": "#a5d8ff"
+  },
+  {
+   "id": "w003",
+   "type": "text",
+   "x": 161.5,
+   "y": -635.5,
+   "width": 171.4,
+   "height": 53.5,
+   "text": "Screenshots",
+   "fontSize": 21,
+   "fill": "#a5d8ff"
+  },
+  {
+   "id": "w004",
+   "type": "text",
+   "x": 613.0,
+   "y": -346.8,
+   "width": 159.6,
+   "height": 53.5,
+   "text": "Two videos",
+   "fontSize": 21,
+   "fill": "#a5d8ff"
+  },
+  {
+   "id": "w005",
+   "type": "text",
+   "x": 655.5,
+   "y": -719.8,
+   "width": 228,
+   "height": 72.2,
+   "text": "Flight over 100k notes",
+   "fontSize": 19
+  },
+  {
+   "id": "w006",
+   "type": "text",
+   "x": 623.5,
+   "y": -1058.0,
+   "width": 228,
+   "height": 72.2,
+   "text": "Board generator that looks real",
+   "fontSize": 19
+  },
+  {
+   "id": "w007",
+   "type": "text",
+   "x": 909.4,
+   "y": -901.1,
+   "width": 155.0,
+   "height": 48.5,
+   "text": "Measure fps",
+   "fontSize": 19
+  },
+  {
+   "id": "w008",
+   "type": "text",
+   "x": 1089.2,
+   "y": -717.8,
+   "width": 208.2,
+   "height": 48.5,
+   "text": "Record at 60 fps",
+   "fontSize": 19
+  },
+  {
+   "id": "w009",
+   "type": "text",
+   "x": 1015.4,
+   "y": -215.5,
+   "width": 218.9,
+   "height": 48.5,
+   "text": "Walking the paths",
+   "fontSize": 19
+  },
+  {
+   "id": "w010",
+   "type": "text",
+   "x": 1243.4,
+   "y": -504.2,
+   "width": 208.2,
+   "height": 48.5,
+   "text": "A big tree board",
+   "fontSize": 19
+  },
+  {
+   "id": "w011",
+   "type": "text",
+   "x": 1354.6,
+   "y": -269.6,
+   "width": 176.3,
+   "height": 48.5,
+   "text": "Slower slides",
+   "fontSize": 19
+  },
+  {
+   "id": "w012",
+   "type": "text",
+   "x": 1361.0,
+   "y": -36.1,
+   "width": 228,
+   "height": 72.2,
+   "text": "Walks are remembered",
+   "fontSize": 19
+  },
+  {
+   "id": "w013",
+   "type": "text",
+   "x": 691.0,
+   "y": 106.3,
+   "width": 183.1,
+   "height": 53.5,
+   "text": "How to build",
+   "fontSize": 21,
+   "fill": "#a5d8ff"
+  },
+  {
+   "id": "w014",
+   "type": "text",
+   "x": 657.3,
+   "y": 233.5,
+   "width": 147,
+   "height": 53.5,
+   "text": "Licence",
+   "fontSize": 21,
+   "fill": "#a5d8ff"
+  },
+  {
+   "id": "w015",
+   "type": "text",
+   "x": 151.0,
+   "y": 241.9,
+   "width": 197.6,
+   "height": 66.3,
+   "text": "Benchmarks",
+   "fontSize": 26,
+   "fill": "#b2f2bb"
+  },
+  {
+   "id": "w016",
+   "type": "text",
+   "x": 521.2,
+   "y": 336.3,
+   "width": 252,
+   "height": 79.8,
+   "text": "Old laptop: HD 4400 + GeForce 840M",
+   "fontSize": 21,
+   "fill": "#b2f2bb"
+  },
+  {
+   "id": "w017",
+   "type": "text",
+   "x": 461.4,
+   "y": 448.8,
+   "width": 147.8,
+   "height": 53.5,
+   "text": "Load time",
+   "fontSize": 21,
+   "fill": "#b2f2bb"
+  },
+  {
+   "id": "w018",
+   "type": "text",
+   "x": 290.8,
+   "y": 527.5,
+   "width": 218.4,
+   "height": 53.5,
+   "text": "Frame time, p99",
+   "fontSize": 21,
+   "fill": "#b2f2bb"
+  },
+  {
+   "id": "w019",
+   "type": "text",
+   "x": 121.2,
+   "y": 568.8,
+   "width": 252,
+   "height": 79.8,
+   "text": "Compare with Excalidraw",
+   "fontSize": 21,
+   "fill": "#b2f2bb"
+  },
+  {
+   "id": "w020",
+   "type": "text",
+   "x": -179.4,
+   "y": 299.4,
+   "width": 182,
+   "height": 66.3,
+   "text": "Releases",
+   "fontSize": 26,
+   "fill": "#ffc9c9"
+  },
+  {
+   "id": "w021",
+   "type": "text",
+   "x": -13.8,
+   "y": 609.7,
+   "width": 194.9,
+   "height": 53.5,
+   "text": "Windows build",
+   "fontSize": 21,
+   "fill": "#ffc9c9"
+  },
+  {
+   "id": "w022",
+   "type": "text",
+   "x": -169.3,
+   "y": 609.7,
+   "width": 171.4,
+   "height": 53.5,
+   "text": "Android APK",
+   "fontSize": 21,
+   "fill": "#ffc9c9"
+  },
+  {
+   "id": "w023",
+   "type": "text",
+   "x": -321.1,
+   "y": 581.9,
+   "width": 147.8,
+   "height": 53.5,
+   "text": "Changelog",
+   "fontSize": 21,
+   "fill": "#ffc9c9"
+  },
+  {
+   "id": "w024",
+   "type": "text",
+   "x": -509.2,
+   "y": 527.5,
+   "width": 218.4,
+   "height": 53.5,
+   "text": "Version numbers",
+   "fontSize": 21,
+   "fill": "#ffc9c9"
+  },
+  {
+   "id": "w025",
+   "type": "text",
+   "x": -479.3,
+   "y": 105.1,
+   "width": 182,
+   "height": 66.3,
+   "text": "Feedback",
+   "fontSize": 26,
+   "fill": "#e5dbff"
+  },
+  {
+   "id": "w026",
+   "type": "text",
+   "x": -638.6,
+   "y": 448.8,
+   "width": 206.6,
+   "height": 53.5,
+   "text": "Issue template",
+   "fontSize": 21,
+   "fill": "#e5dbff"
+  },
+  {
+   "id": "w027",
+   "type": "text",
+   "x": -732.9,
+   "y": 349.4,
+   "width": 171.4,
+   "height": 53.5,
+   "text": "Discussions",
+   "fontSize": 21,
+   "fill": "#e5dbff"
+  },
+  {
+   "id": "w028",
+   "type": "text",
+   "x": -903.5,
+   "y": 106.3,
+   "width": 241.9,
+   "height": 53.5,
+   "text": "Who to show first",
+   "fontSize": 21,
+   "fill": "#e5dbff"
+  },
+  {
+   "id": "w029",
+   "type": "text",
+   "x": -1164.6,
+   "y": 338.1,
+   "width": 228,
+   "height": 72.2,
+   "text": "Friends from the course",
+   "fontSize": 19
+  },
+  {
+   "id": "w030",
+   "type": "text",
+   "x": -1218.3,
+   "y": 167.1,
+   "width": 187.0,
+   "height": 48.5,
+   "text": "Obsidian forum",
+   "fontSize": 19
+  },
+  {
+   "id": "w031",
+   "type": "text",
+   "x": -1216.5,
+   "y": -24.2,
+   "width": 133,
+   "height": 48.5,
+   "text": "r/rust",
+   "fontSize": 19
+  },
+  {
+   "id": "w032",
+   "type": "text",
+   "x": -459.1,
+   "y": -203.1,
+   "width": 182,
+   "height": 66.3,
+   "text": "Clean up",
+   "fontSize": 26,
+   "fill": "#ffd8a8"
+  },
+  {
+   "id": "w033",
+   "type": "text",
+   "x": -886.8,
+   "y": -237.7,
+   "width": 252,
+   "height": 79.8,
+   "text": "No secrets in history",
+   "fontSize": 21,
+   "fill": "#ffd8a8"
+  },
+  {
+   "id": "w034",
+   "type": "text",
+   "x": -1234.3,
+   "y": -215.5,
+   "width": 218.9,
+   "height": 48.5,
+   "text": "Scan every commit",
+   "fontSize": 19
+  },
+  {
+   "id": "w035",
+   "type": "text",
+   "x": -1164.6,
+   "y": -410.3,
+   "width": 228,
+   "height": 72.2,
+   "text": "Sync config stays local",
+   "fontSize": 19
+  },
+  {
+   "id": "w036",
+   "type": "text",
+   "x": -773.2,
+   "y": -403.0,
+   "width": 252,
+   "height": 53.5,
+   "text": "English everywhere",
+   "fontSize": 21,
+   "fill": "#ffd8a8"
+  },
+  {
+   "id": "w037",
+   "type": "text",
+   "x": -650.4,
+   "y": -502.4,
+   "width": 230.2,
+   "height": 53.5,
+   "text": "Remove dev files",
+   "fontSize": 21,
+   "fill": "#ffd8a8"
+  },
+  {
+   "id": "w038",
+   "type": "text",
+   "x": -222.3,
+   "y": -356.5,
+   "width": 182,
+   "height": 66.3,
+   "text": "Next",
+   "fontSize": 26,
+   "fill": "#96f2d7"
+  },
+  {
+   "id": "w039",
+   "type": "text",
+   "x": -526.0,
+   "y": -594.2,
+   "width": 252,
+   "height": 79.8,
+   "text": "Links to Obsidian notes",
+   "fontSize": 21,
+   "fill": "#96f2d7"
+  },
+  {
+   "id": "w040",
+   "type": "text",
+   "x": -332.9,
+   "y": -635.5,
+   "width": 171.4,
+   "height": 53.5,
+   "text": "Projections",
+   "fontSize": 21,
+   "fill": "#96f2d7"
+  },
+  {
+   "id": "w041",
+   "type": "text",
+   "x": -157.1,
+   "y": -663.3,
+   "width": 147,
+   "height": 53.5,
+   "text": "iOS",
+   "fontSize": 21,
+   "fill": "#96f2d7"
+  }
+ ],
+ "edges": [
+  {
+   "id": "e000",
+   "fromNode": "w001",
+   "toNode": "w002",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e001",
+   "fromNode": "w001",
+   "toNode": "w003",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e002",
+   "fromNode": "w005",
+   "toNode": "w006",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e003",
+   "fromNode": "w005",
+   "toNode": "w007",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e004",
+   "fromNode": "w005",
+   "toNode": "w008",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e005",
+   "fromNode": "w004",
+   "toNode": "w005",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e006",
+   "fromNode": "w009",
+   "toNode": "w010",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e007",
+   "fromNode": "w009",
+   "toNode": "w011",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e008",
+   "fromNode": "w009",
+   "toNode": "w012",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e009",
+   "fromNode": "w004",
+   "toNode": "w009",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e010",
+   "fromNode": "w001",
+   "toNode": "w004",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e011",
+   "fromNode": "w001",
+   "toNode": "w013",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e012",
+   "fromNode": "w001",
+   "toNode": "w014",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e013",
+   "fromNode": "w000",
+   "toNode": "w001",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e014",
+   "fromNode": "w015",
+   "toNode": "w016",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e015",
+   "fromNode": "w015",
+   "toNode": "w017",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e016",
+   "fromNode": "w015",
+   "toNode": "w018",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e017",
+   "fromNode": "w015",
+   "toNode": "w019",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e018",
+   "fromNode": "w000",
+   "toNode": "w015",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e019",
+   "fromNode": "w020",
+   "toNode": "w021",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e020",
+   "fromNode": "w020",
+   "toNode": "w022",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e021",
+   "fromNode": "w020",
+   "toNode": "w023",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e022",
+   "fromNode": "w020",
+   "toNode": "w024",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e023",
+   "fromNode": "w000",
+   "toNode": "w020",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e024",
+   "fromNode": "w025",
+   "toNode": "w026",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e025",
+   "fromNode": "w025",
+   "toNode": "w027",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e026",
+   "fromNode": "w028",
+   "toNode": "w029",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e027",
+   "fromNode": "w028",
+   "toNode": "w030",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e028",
+   "fromNode": "w028",
+   "toNode": "w031",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e029",
+   "fromNode": "w025",
+   "toNode": "w028",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e030",
+   "fromNode": "w000",
+   "toNode": "w025",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e031",
+   "fromNode": "w033",
+   "toNode": "w034",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e032",
+   "fromNode": "w033",
+   "toNode": "w035",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e033",
+   "fromNode": "w032",
+   "toNode": "w033",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e034",
+   "fromNode": "w032",
+   "toNode": "w036",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e035",
+   "fromNode": "w032",
+   "toNode": "w037",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e036",
+   "fromNode": "w000",
+   "toNode": "w032",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e037",
+   "fromNode": "w038",
+   "toNode": "w039",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e038",
+   "fromNode": "w038",
+   "toNode": "w040",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e039",
+   "fromNode": "w038",
+   "toNode": "w041",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e040",
+   "fromNode": "w000",
+   "toNode": "w038",
+   "fromEnd": "none",
+   "toEnd": "arrow"
+  },
+  {
+   "id": "e041",
+   "fromNode": "w007",
+   "toNode": "w018",
+   "fromEnd": "none",
+   "toEnd": "none"
+  },
+  {
+   "id": "e042",
+   "fromNode": "w019",
+   "toNode": "w005",
+   "fromEnd": "none",
+   "toEnd": "none"
+  },
+  {
+   "id": "e043",
+   "fromNode": "w023",
+   "toNode": "w024",
+   "fromEnd": "none",
+   "toEnd": "none"
+  },
+  {
+   "id": "e044",
+   "fromNode": "w012",
+   "toNode": "w040",
+   "fromEnd": "none",
+   "toEnd": "none"
+  },
+  {
+   "id": "e045",
+   "fromNode": "w003",
+   "toNode": "w008",
+   "fromEnd": "none",
+   "toEnd": "none"
+  },
+  {
+   "id": "e046",
+   "fromNode": "w035",
+   "toNode": "w022",
+   "fromEnd": "none",
+   "toEnd": "none"
+  }
+ ],
+ "dimensions": [
+  {
+   "id": "main",
+   "name": "Main",
+   "nest": "contains"
+  }
+ ]
+}

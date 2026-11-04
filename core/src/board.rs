@@ -100,6 +100,9 @@ pub struct Board {
     idx: HashMap<String, usize>,
     parent: HashMap<String, String>,
     children: HashMap<String, Vec<String>>,
+    roots: Vec<String>,
+    /// Edge positions by id as of the last reindex (checked on use).
+    eidx: HashMap<String, usize>,
     rng: u64,
 }
 
@@ -111,7 +114,10 @@ fn take_s(m: &mut Map<String, Value>, k: &str) -> Option<String> {
 }
 
 pub fn node_from_json(v: &Value) -> Option<Node> {
-    let mut m = v.as_object()?.clone();
+    node_from_map(v.as_object()?.clone())
+}
+
+fn node_from_map(mut m: Map<String, Value>) -> Option<Node> {
     let id = take_s(&mut m, "id")?;
     m.remove("type");
     Some(Node {
@@ -155,7 +161,10 @@ pub fn node_to_json(n: &Node) -> Value {
 }
 
 pub fn edge_from_json(v: &Value) -> Option<Edge> {
-    let mut m = v.as_object()?.clone();
+    edge_from_map(v.as_object()?.clone())
+}
+
+fn edge_from_map(mut m: Map<String, Value>) -> Option<Edge> {
     let end = |m: &mut Map<String, Value>, k: &str| take_s(m, k).as_deref() == Some("arrow");
     Some(Edge {
         id: take_s(&mut m, "id")?,
@@ -214,12 +223,20 @@ impl Board {
 
     pub fn parse(text: &str) -> Result<Board, String> {
         let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let mut m = v.as_object().ok_or("not a JSON object")?.clone();
-        let nodes = m.remove("nodes").and_then(|v| v.as_array().cloned()).unwrap_or_default();
-        let edges = m.remove("edges").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let Value::Object(mut m) = v else { return Err("not a JSON object".into()) };
+        let list = |v: Option<Value>| match v {
+            Some(Value::Array(a)) => a,
+            _ => Vec::new(),
+        };
+        let obj = |v: Value| match v {
+            Value::Object(o) => Some(o),
+            _ => None,
+        };
+        let nodes = list(m.remove("nodes"));
+        let edges = list(m.remove("edges"));
         let mut b = Board { rng: now_ms() | 1, extra: m, ..Default::default() };
-        b.nodes = nodes.iter().filter_map(node_from_json).collect();
-        b.edges = edges.iter().filter_map(edge_from_json).collect();
+        b.nodes = nodes.into_iter().filter_map(obj).filter_map(node_from_map).collect();
+        b.edges = edges.into_iter().filter_map(obj).filter_map(edge_from_map).collect();
         b.reindex();
         Ok(b)
     }
@@ -262,6 +279,7 @@ impl Board {
         self.idx = self.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), i)).collect();
         let idx = &self.idx;
         self.edges.retain(|e| idx.contains_key(&e.from) && idx.contains_key(&e.to) && e.from != e.to);
+        self.eidx = self.edges.iter().enumerate().map(|(i, e)| (e.id.clone(), i)).collect();
         self.parent.clear();
         self.children.clear();
         for e in &self.edges {
@@ -282,9 +300,11 @@ impl Board {
                 cur = p;
             }
         }
+        self.roots.clear();
         for n in &self.nodes {
-            if let Some(p) = self.parent.get(&n.id) {
-                self.children.entry(p.clone()).or_default().push(n.id.clone());
+            match self.parent.get(&n.id) {
+                Some(p) => self.children.entry(p.clone()).or_default().push(n.id.clone()),
+                None => self.roots.push(n.id.clone()),
             }
         }
     }
@@ -317,11 +337,17 @@ impl Board {
     pub fn node(&self, id: &str) -> &Node {
         &self.nodes[self.idx[id]]
     }
+    fn edge_pos(&self, id: &str) -> Option<usize> {
+        match self.eidx.get(id) {
+            Some(&i) if self.edges.get(i).is_some_and(|e| e.id == id) => Some(i),
+            _ => self.edges.iter().position(|e| e.id == id),
+        }
+    }
     pub fn edge(&self, id: &str) -> Option<&Edge> {
-        self.edges.iter().find(|e| e.id == id)
+        self.edge_pos(id).map(|i| &self.edges[i])
     }
     pub fn edge_mut(&mut self, id: &str) -> Option<&mut Edge> {
-        self.edges.iter_mut().find(|e| e.id == id)
+        self.edge_pos(id).map(|i| &mut self.edges[i])
     }
     pub fn parent(&self, id: &str) -> Option<&str> {
         self.parent.get(id).map(String::as_str)
@@ -334,11 +360,11 @@ impl Board {
     }
     /// Top-level concepts, borrowed.
     pub fn roots_ref(&self) -> Vec<&str> {
-        self.nodes.iter().filter(|n| !self.parent.contains_key(&n.id)).map(|n| n.id.as_str()).collect()
+        self.roots.iter().map(String::as_str).collect()
     }
 
     pub fn roots(&self) -> Vec<String> {
-        self.nodes.iter().filter(|n| !self.parent.contains_key(&n.id)).map(|n| n.id.clone()).collect()
+        self.roots.clone()
     }
     /// `id` and everything nested in it, parents before children.
     pub fn subtree(&self, id: &str) -> Vec<String> {
