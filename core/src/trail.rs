@@ -25,11 +25,11 @@ pub enum Layout {
     /// Real sizes, each on the side where it lies on the board.
     Map,
     /// Own side, all at one scale.
-    #[default]
     Near,
     /// Incoming on the left, outgoing on the right, one scale.
     Right,
-    /// Incoming above, outgoing below, one scale.
+    /// Incoming above, outgoing below, one scale. The default.
+    #[default]
     Down,
 }
 

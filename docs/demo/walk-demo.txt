@@ -1,6 +1,7 @@
 # Path mode demo, recorded for the README. Run on a copy of the board:
 #   hyperschema walk-copy.hyperschema --script walk-demo.txt --pointer
 fit
+layout down
 pause 1800
 caption Select a note and press Path: what it is linked to comes out
 tap Clean up
@@ -35,12 +36,32 @@ tap Walking the paths
 settle
 pause 1800
 caption Back to the start: what you looked at stays out
-tap Put Hyperschema on GitHub
+crumb 0
 settle
 pause 1500
+caption Step into a frame: what it holds comes out at one scale
 tap Benchmarks
 settle
 pause 1800
+tap Frame time, p99
+settle
+pause 2200
+caption Map: real sizes, as on the board
+crumb layout
+settle
+pause 2200
+caption Near: one scale, each on its own side
+crumb layout
+settle
+pause 2400
+caption Tree: incoming above, outgoing below
+crumb layout
+settle
+pause 700
+crumb layout
+settle
+pause 1800
+caption Esc: everything slides home
 key esc
 settle
 pause 1200

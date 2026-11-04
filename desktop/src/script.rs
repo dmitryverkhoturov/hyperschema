@@ -7,7 +7,7 @@
 //! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
 //! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group|path
 //! key left|right|up|down|home|end|del|selall|copy|cut|paste|dup|tab [shift] [ctrl]
-//! tap TEXT (click the middle of the concept with this text; with --pointer the pointer glides there) | pause MS (keeps drawing) | caption TEXT (subtitle; none clears) | settle (until nothing slides)
+//! tap TEXT (click the middle of the concept with this text; with --pointer the pointer glides there) | pause MS (keeps drawing) | caption TEXT (subtitle; none clears) | layout map|near|right|down (next walk) | crumb K|layout (tap link K or the layout switch of the path bar) | settle (until nothing slides)
 //! find TEXT|next|prev|close | wait MS | choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
 //! timeline open|seek N|restore|close | shot out.png | state | tree | quit
 //! (# starts a comment)
@@ -198,9 +198,17 @@ impl State {
                     self.maybe_save();
                 }
             }
+            "layout" => match hs_core::trail::Layout::from_key(w.get(1).copied().unwrap_or("")) {
+                Some(l) => self.ed.layout = l,
+                None => note = "layouts: map near right down".into(),
+            },
             "caption" => self.caption = line.splitn(2, ' ').nth(1).unwrap_or("").trim().to_string(),
             "pause" => self.script.as_mut().unwrap().until = Some(std::time::Instant::now() + std::time::Duration::from_millis(n(1) as u64)),
             "settle" => self.script.as_mut().unwrap().settling = true,
+            "crumb" => match self.ed.bar_spot(if w.get(1) == Some(&"layout") { hs_core::editor::BAR_LAYOUT } else { n(1) as i32 }) {
+                Some((x, y)) => queue = self.glide_click(x as f64, y as f64),
+                None => note = "no such link in the path bar".into(),
+            },
             "tap" => {
                 let t = line.splitn(2, ' ').nth(1).unwrap_or("").trim().to_string();
                 let b = self.shown();
@@ -213,16 +221,7 @@ impl State {
                         let cam = self.ed.engine.cam;
                         let (w, h) = self.ed.engine.size();
                         let (x, y) = ((cx as f64 - cam.cx) * cam.s + w as f64 * 0.5, (cy as f64 - cam.cy) * cam.s + h as f64 * 0.5);
-                        self.last_press = None;
-                        // The pointer glides there (seen in demo videos), then clicks.
-                        let (x0, y0) = (self.ed.cursor.x, self.ed.cursor.y);
-                        let steps = if self.pointer { 22 } else { 1 };
-                        for k in 1..=steps {
-                            let t = k as f64 / steps as f64;
-                            let e = t * t * (3.0 - 2.0 * t);
-                            queue.push(format!("move {} {}", x0 + (x - x0) * e, y0 + (y - y0) * e));
-                        }
-                        queue.extend(["down".to_string(), "up".to_string()]);
+                        queue = self.glide_click(x, y);
                     }
                     None => note = "no such concept".into(),
                 }
@@ -279,6 +278,23 @@ impl State {
             sc.out.push_str(&format!("{line}{}{note}\n", if note.is_empty() { "" } else { "  -> " }));
         }
         true
+    }
+
+    /// Steps that click at (x, y); with `--pointer` the pointer glides
+    /// there first, as seen in demo videos.
+    fn glide_click(&mut self, x: f64, y: f64) -> Vec<String> {
+        self.last_press = None;
+        let (x0, y0) = (self.ed.cursor.x, self.ed.cursor.y);
+        let steps = if self.pointer { 22 } else { 1 };
+        let mut q: Vec<String> = (1..=steps)
+            .map(|k| {
+                let t = k as f64 / steps as f64;
+                let e = t * t * (3.0 - 2.0 * t);
+                format!("move {} {}", x0 + (x - x0) * e, y0 + (y - y0) * e)
+            })
+            .collect();
+        q.extend(["down".to_string(), "up".to_string()]);
+        q
     }
 
     pub fn harness_shot(&mut self, pre: &str) {

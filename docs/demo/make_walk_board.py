@@ -26,12 +26,7 @@ TREE = ("Put Hyperschema on GitHub", [
         ("How to build", []),
         ("Licence", []),
     ]),
-    ("Benchmarks", [
-        ("Old laptop: HD 4400 + GeForce 840M", []),
-        ("Load time", []),
-        ("Frame time, p99", []),
-        ("Compare with Excalidraw", []),
-    ]),
+    ("Benchmarks", []),
     ("Releases", [
         ("Windows build", []),
         ("Android APK", []),
@@ -62,6 +57,13 @@ TREE = ("Put Hyperschema on GitHub", [
     ]),
 ])
 
+# Frames: concepts nested inside, each level several times smaller, as on
+# a hand-made board. In path mode they come out at one scale.
+FRAMES = {
+    "Benchmarks": ["Old laptop: HD 4400 + GeForce 840M", "Load time", "Frame time, p99", "Compare with Excalidraw"],
+    "Frame time, p99": ["60 Hz screen: 16.7 ms a frame", "p50 17 ms", "p99 under 25 ms", "Text rebuilt off the frame"],
+}
+
 CROSS = [
     ("Measure fps", "Frame time, p99"),
     ("Compare with Excalidraw", "Flight over 100k notes"),
@@ -90,22 +92,69 @@ def size(text, font):
     return w, lines * font * 1.25 + font * 1.3
 
 
+def frame(text, font, fill, x, y):
+    """A frame at (x, y) holding FRAMES[text] in rows at about a third of its font."""
+    kids = FRAMES[text]
+    f = font / 3.2
+    pad, gap = font * 0.5, f * 2
+    sizes = [frame_size(k, f) if k in FRAMES else size(k, f) for k in kids]
+    cols = 2
+    col_w = [max(sizes[i][0] for i in range(c, len(kids), cols)) for c in range(cols)]
+    rows = [max(sizes[i][1] for i in range(r * cols, min(len(kids), r * cols + cols))) for r in range((len(kids) + cols - 1) // cols)]
+    title = font * 1.25 + font
+    w = sum(col_w) + gap * (cols - 1) + 2 * pad + gap
+    h = title + sum(rows) + gap * (len(rows) - 1) + pad + gap * 0.5
+    nid = add(text, x, y, w, h, font, None)
+    for i, k in enumerate(kids):
+        c, r = i % cols, i // cols
+        kx = x + pad + gap * 0.5 + sum(col_w[:c]) + gap * c
+        ky = y + title + sum(rows[:r]) + gap * r
+        if k in FRAMES:
+            kid = frame(k, f, fill, kx, ky)
+        else:
+            kw, kh = sizes[i]
+            kid = add(k, kx, ky, kw, kh, f, fill)
+        edges.append({"id": f"e{len(edges):03d}", "fromNode": nid, "toNode": kid, "kind": "contains",
+                      "fromEnd": "none", "toEnd": "none"})
+    return nid
+
+
+def frame_size(text, font):
+    # Measured by laying it out on a scratch list.
+    global nodes, edges
+    saved = (nodes, edges, dict(ids))
+    nodes, edges = [], []
+    frame(text, font, None, 0, 0)
+    w, h = nodes[0]["width"], nodes[0]["height"]
+    nodes, edges = saved[0], saved[1]
+    ids.clear()
+    ids.update(saved[2])
+    return w, h
+
+
+def add(text, x, y, w, h, font, fill):
+    nid = f"w{len(nodes):03d}"
+    ids[text] = nid
+    node = {"id": nid, "type": "text", "x": round(x, 1), "y": round(y, 1),
+            "width": round(w, 1), "height": round(h, 1), "text": text, "fontSize": round(font, 2)}
+    if fill:
+        node["fill"] = fill
+    nodes.append(node)
+    return nid
+
+
 def place(t, depth, a0, a1, fill):
     text, kids = t
     radius = [0, 340, 640, 920, 1180][depth]
     a = (a0 + a1) / 2
     font = [34, 26, 21, 19, 19][depth]
-    w, h = size(text, font)
     cx, cy = radius * math.cos(a) * 1.25, radius * math.sin(a)
-    nid = f"w{len(nodes):03d}"
-    ids[text] = nid
-    node = {"id": nid, "type": "text", "x": round(cx - w / 2, 1), "y": round(cy - h / 2, 1),
-            "width": round(w, 1), "height": round(h, 1), "text": text, "fontSize": font}
-    if depth == 0:
-        node["fill"] = ROOT_FILL
-    elif depth <= 2:
-        node["fill"] = fill
-    nodes.append(node)
+    if text in FRAMES:
+        w, h = frame_size(text, font)
+        nid = frame(text, font, fill, cx - w / 2, cy - h / 2)
+    else:
+        w, h = size(text, font)
+        nid = add(text, cx - w / 2, cy - h / 2, w, h, font, ROOT_FILL if depth == 0 else fill if depth <= 2 else None)
     total = leaves(t)
     at = a0
     for i, k in enumerate(kids):

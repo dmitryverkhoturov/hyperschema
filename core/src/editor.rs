@@ -1064,6 +1064,11 @@ impl Editor {
         self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: crate::trail::EASE_MS });
     }
 
+    /// Middle of the path bar's link `k` in screen pixels (scripts tap it).
+    pub fn bar_spot(&self, k: i32) -> Option<(f32, f32)> {
+        self.bar_hits.iter().find(|h| h.1 == k).map(|(b, _)| ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5))
+    }
+
     /// The path bar in screen pixels: back arrow, then the links. Shells
     /// put it in their screen layer each frame; taps on it go to `press`.
     pub fn path_ui(&mut self, top: f32) -> Scene {
