@@ -7,6 +7,7 @@
 //! drag X0 Y0 X1 Y1 [alt] [shift] | rdrag X0 Y0 X1 Y1 | dbldrag X0 Y0 X1 Y1
 //! type TEXT | key esc|enter|backspace|delete|sdelete|undo|redo|save|group|path
 //! key left|right|up|down|home|end|del|selall|copy|cut|paste|dup|tab [shift] [ctrl]
+//! tap TEXT (click the middle of the concept with this text) | pause MS (keeps drawing) | settle (until nothing slides)
 //! find TEXT|next|prev|close | wait MS | choose N (answer to the next popup menu) | wheel N | fit | cam X Y S | screen
 //! timeline open|seek N|restore|close | shot out.png | state | tree | quit
 //! (# starts a comment)
@@ -25,20 +26,32 @@ pub struct Script {
     queue: Vec<String>,
     /// `prof`: log how long each pointer move takes.
     prof: bool,
+    /// `pause` / `settle`: the next line waits for this, frames keep coming.
+    until: Option<std::time::Instant>,
+    settling: bool,
 }
 
 impl Script {
     pub fn load(path: &str) -> Script {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let lines = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect();
-        Script { lines, pos: 0, log: PathBuf::from(format!("{path}.log")), out: String::new(), queue: Vec::new(), prof: false }
+        Script { lines, pos: 0, log: PathBuf::from(format!("{path}.log")), out: String::new(), queue: Vec::new(), prof: false, until: None, settling: false }
     }
 }
 
 impl State {
     /// Runs the next scripted step. Returns false when the script is over.
     pub fn script_step(&mut self) -> bool {
+        let busy = self.ed.animating() && !self.editing_text();
         let Some(sc) = &mut self.script else { return false };
+        if sc.until.is_some_and(|u| std::time::Instant::now() < u) {
+            return true;
+        }
+        sc.until = None;
+        if sc.settling && busy {
+            return true;
+        }
+        sc.settling = false;
         let line = if !sc.queue.is_empty() {
             sc.queue.remove(0)
         } else if sc.pos < sc.lines.len() {
@@ -182,6 +195,26 @@ impl State {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                     self.on_sync();
                     self.maybe_save();
+                }
+            }
+            "pause" => self.script.as_mut().unwrap().until = Some(std::time::Instant::now() + std::time::Duration::from_millis(n(1) as u64)),
+            "settle" => self.script.as_mut().unwrap().settling = true,
+            "tap" => {
+                let t = line.splitn(2, ' ').nth(1).unwrap_or("").trim().to_string();
+                let b = self.shown();
+                let flat = |n: &&hs_core::board::Node| n.text.replace('\n', " ").trim().to_string();
+                let hit = b.nodes.iter().find(|n| flat(n) == t).or_else(|| b.nodes.iter().find(|n| flat(n).starts_with(&t)));
+                match hit {
+                    Some(nd) => {
+                        // A parent by its title: its middle is its children's.
+                        let (cx, cy) = if b.has_children(&nd.id) { (nd.center().0, nd.y + nd.font) } else { nd.center() };
+                        let cam = self.ed.engine.cam;
+                        let (w, h) = self.ed.engine.size();
+                        let (x, y) = ((cx as f64 - cam.cx) * cam.s + w as f64 * 0.5, (cy as f64 - cam.cy) * cam.s + h as f64 * 0.5);
+                        self.last_press = None;
+                        queue = vec![format!("move {x} {y}"), "down".into(), "up".into()];
+                    }
+                    None => note = "no such concept".into(),
                 }
             }
             "wheel" => {

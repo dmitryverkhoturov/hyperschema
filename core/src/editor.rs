@@ -173,6 +173,9 @@ pub struct Editor {
     pub routes: HashMap<String, Vec<Pt>>,
     /// Routes before lanes, kept so a drag re-routes only what it touches.
     raw_routes: HashMap<String, Vec<Pt>>,
+    /// What slides in path mode (with what it holds): drawn in the overlay
+    /// while the scene, built once without it, stays still.
+    sliding: Option<HashSet<String>>,
     /// Show connections between a concept and what is nested in it.
     pub show_nested_links: bool,
     /// The pointer moved during a move or resize; applied once per frame.
@@ -256,6 +259,7 @@ impl Editor {
             mode: Mode::Idle,
             routes: HashMap::new(),
             raw_routes: HashMap::new(),
+            sliding: None,
             show_nested_links: false,
             drag_pending: false,
             hidden_nodes: HashSet::new(),
@@ -411,9 +415,20 @@ impl Editor {
 
     /// Rebuilds routes and the indexed scene, minus what the overlay draws.
     pub fn rebuild(&mut self) {
+        // A slide starting from where everything is drawn now: only
+        // connections new to the board as drawn need a route; the rest are
+        // routed when it ends.
+        let only = self.trail.as_ref().is_some_and(|t| t.animating()).then(HashSet::new);
+        self.rebuild_routing(only);
+    }
+
+    /// `only`: the connections to route again (with those the board as
+    /// drawn has no route for yet); `None` routes all.
+    fn rebuild_routing(&mut self, only: Option<HashSet<String>>) {
         self.sync_trail();
+        self.sliding = None;
         let board = self.shown().clone();
-        self.raw_routes = route::raw_routes(&board, self.show_nested_links, None, &HashMap::new());
+        self.raw_routes = route::raw_routes(&board, self.show_nested_links, only.as_ref(), &self.raw_routes);
         self.routes = route::finish(&board, &self.raw_routes);
         self.build_scene(&board);
     }
@@ -421,32 +436,60 @@ impl Editor {
     fn build_scene(&mut self, board: &Board) {
         let bright = self.trail.as_ref().filter(|t| !t.leaving).map(|t| t.bright(&self.board));
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
-        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges, bright: bright.as_ref() };
+        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges, bright: bright.as_ref(), moving: self.sliding.as_ref() };
         let scene = view::build(board, &self.routes, &m, &skip, view::bg_color());
         self.engine.set_scene(scene);
     }
 
-    /// While concepts slide: only their connections are routed again
-    /// (straight around their ends), the rest keep their routes.
+    /// While concepts slide: only what slides moves in the board as drawn
+    /// (its structure stays as the last rebuild left it) and its connections
+    /// go straight between their ends. The scene is built once per slide
+    /// without them; `slide_into` draws them over it each frame.
     fn rebuild_moving(&mut self) {
         let Some(t) = &self.trail else { return };
-        let moving_ids = t.moving();
-        self.display = Some(t.display(&self.board));
-        let board = self.shown().clone();
-        let mut moving: HashSet<String> = HashSet::new();
-        for id in moving_ids {
-            if board.get(&id).is_some() {
-                moving.extend(board.subtree(&id));
+        let Some(mut board) = self.display.take() else { return self.rebuild() };
+        if self.sliding.is_none() {
+            let mut moving: HashSet<String> = HashSet::new();
+            for id in t.moving() {
+                if self.board.get(&id).is_some() {
+                    moving.extend(self.board.subtree(&id));
+                }
             }
+            self.sliding = Some(moving);
+            self.build_scene(&board);
         }
+        let (Some(t), Some(moving)) = (&self.trail, &self.sliding) else { return };
+        t.pose_all(&self.board, &mut board, moving);
         for e in &board.edges {
             if (moving.contains(&e.from) || moving.contains(&e.to)) && route::shown(&board, e, self.show_nested_links) {
                 if let (Some(a), Some(b)) = (board.get(&e.from), board.get(&e.to)) {
-                    self.routes.insert(e.id.clone(), route::route_between(&board, a, b));
+                    self.routes.insert(e.id.clone(), route::clip(&[a.center(), b.center()], &a.bbox(), &b.bbox()));
                 }
             }
         }
-        self.build_scene(&board);
+        self.display = Some(board);
+    }
+
+    /// What slides, under the walk: dimmed (or plain, when the walk ends)
+    /// unless the walk draws it bright itself.
+    fn slide_into(&self, board: &Board, ov: &mut Scene) {
+        let Some(moving) = &self.sliding else { return };
+        let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
+        let bright = self.trail.as_ref().filter(|t| !t.leaving).map(|t| t.bright(&self.board));
+        let lit = |id: &str| bright.as_ref().is_some_and(|b| b.contains(id));
+        let look = if bright.is_some() { Look::Dim } else { Look::Plain };
+        for id in board.draw_order() {
+            if moving.contains(&id) && !lit(&id) && !self.hidden_nodes.contains(&id) {
+                view::node_styled(board, board.node(&id), &m, look, ov);
+            }
+        }
+        for e in &board.edges {
+            if (moving.contains(&e.from) || moving.contains(&e.to)) && !(lit(&e.from) && lit(&e.to)) && !self.hidden_edges.contains(&e.id) {
+                if let Some(p) = self.routes.get(&e.id) {
+                    view::edge_styled(board, &e.id, p, &m, view::bg_color(), look == Look::Dim, ov);
+                }
+            }
+        }
     }
 
     /// Keeps the walk in step with the board (deleted and new concepts)
@@ -508,15 +551,29 @@ impl Editor {
     /// Selection, handles, things being dragged, caret, guides. Called once
     /// per frame, so it also applies a pending drag.
     pub fn refresh_overlay(&mut self) {
+        let started = Instant::now();
+        self.refresh_overlay_inner();
+        if self.trail.is_some() {
+            if let Some(p) = std::env::var_os("HS_PROF") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
+                    let _ = writeln!(f, "frame {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+        }
+    }
+
+    fn refresh_overlay_inner(&mut self) {
         self.edge_pan();
         self.flush_drag();
         self.fly();
         self.tick_trail();
         let mut ov = Scene::default();
         let px = self.px();
-        let board = self.shown().clone();
+        let board = self.shown();
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
-        self.walk_into(&board, &mut ov);
+        self.slide_into(board, &mut ov);
+        self.walk_into(board, &mut ov);
         // Live elements.
         for id in board.draw_order() {
             if self.hidden_nodes.contains(&id) {
@@ -737,14 +794,28 @@ impl Editor {
             return;
         }
         t.tick();
+        let started = Instant::now();
         let (done, leaving) = (!t.animating(), t.leaving);
         if done && leaving {
             self.trail = None;
             self.rebuild();
         } else if done {
-            self.rebuild();
+            // Only connections of what slid have moved; the rest keep their routes.
+            match self.sliding.take() {
+                Some(moved) => {
+                    let only = self.shown().edges.iter().filter(|e| moved.contains(&e.from) || moved.contains(&e.to)).map(|e| e.id.clone()).collect();
+                    self.rebuild_routing(Some(only));
+                }
+                None => self.rebuild(),
+            }
         } else {
             self.rebuild_moving();
+        }
+        if let Some(p) = std::env::var_os("HS_PROF") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
+                let _ = writeln!(f, "slide {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
 
@@ -989,7 +1060,7 @@ impl Editor {
         let fit = ((w as f64 / (b[2] - b[0]).max(1.0) as f64).min((h as f64 - self.ui_top as f64) / (b[3] - b[1]).max(1.0) as f64)) * 0.8;
         let s = cam.s.min(fit);
         let to = ((b[0] + b[2]) as f64 * 0.5, (b[1] + b[3]) as f64 * 0.5 - self.ui_top as f64 * 0.25 / s, s);
-        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: crate::trail::EASE_MS + 100.0 });
+        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: crate::trail::EASE_MS });
     }
 
     /// The path bar in screen pixels: back arrow, then the links. Shells
@@ -1866,7 +1937,7 @@ impl Editor {
         self.raw_routes = route::raw_routes(&self.board, self.show_nested_links, Some(&dirty), &self.raw_routes);
         self.routes = route::finish(&self.board, &self.raw_routes);
         let m = |t: &str, s: f32, w: f32| self.engine.wrapped_lines(t, s, w);
-        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges, bright: None };
+        let skip = view::Skip { nodes: &self.hidden_nodes, edges: &self.hidden_edges, bright: None, moving: None };
         let scene = view::build(&self.board, &self.routes, &m, &skip, view::bg_color());
         self.engine.set_scene(scene);
     }

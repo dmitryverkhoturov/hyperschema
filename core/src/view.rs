@@ -134,19 +134,23 @@ pub struct Skip<'a> {
     /// the overlay draws the walk on top (the scene's draw order is spatial,
     /// so only a separate layer stays reliably in front).
     pub bright: Option<&'a HashSet<String>>,
+    /// Concepts sliding in path mode, with their connections: the overlay
+    /// draws them each frame, the scene stays still.
+    pub moving: Option<&'a HashSet<String>>,
 }
 
 pub fn build(board: &Board, routes: &HashMap<String, Vec<Pt>>, m: Measure, skip: &Skip, bg: u32) -> Scene {
     let mut s = Scene::default();
     let lit = |id: &str| skip.bright.is_some_and(|b| b.contains(id));
+    let moving = |id: &str| skip.moving.is_some_and(|m| m.contains(id));
     let look = if skip.bright.is_some() { Look::Dim } else { Look::Plain };
     for id in board.draw_order() {
-        if !skip.nodes.contains(&id) && !lit(&id) {
+        if !skip.nodes.contains(&id) && !lit(&id) && !moving(&id) {
             node_styled(board, board.node(&id), m, look, &mut s);
         }
     }
     for e in &board.edges {
-        if skip.edges.contains(&e.id) || (lit(&e.from) && lit(&e.to)) {
+        if skip.edges.contains(&e.id) || (lit(&e.from) && lit(&e.to)) || moving(&e.from) || moving(&e.to) {
             continue;
         }
         if let Some(p) = routes.get(&e.id) {

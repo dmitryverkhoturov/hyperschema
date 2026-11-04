@@ -289,20 +289,26 @@ fn separate(paths: &mut [Vec<Pt>], gaps: &[f32], ends: &[(Bbox, Bbox)]) {
     if n < 2 {
         return;
     }
-    // Segments in a coarse grid; only segments sharing a cell are compared.
-    let cell = gaps.iter().copied().fold(0.0f32, f32::max).max(1e-3) * 8.0;
-    let mut grid: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    // Segments in coarse grids, one per scale (powers of two of the gap,
+    // each segment in its own and the next): only segments sharing a cell
+    // are compared, and a board's big frames do not make its small notes'
+    // cells huge.
+    let mut grid: HashMap<(i32, i32, i32), Vec<(usize, usize)>> = HashMap::new();
     for (i, p) in paths.iter().enumerate() {
-        for k in 0..p.len().saturating_sub(1) {
-            let (a, b) = (p[k], p[k + 1]);
-            let (x0, x1) = ((a.0.min(b.0) / cell).floor() as i32, (a.0.max(b.0) / cell).floor() as i32);
-            let (y0, y1) = ((a.1.min(b.1) / cell).floor() as i32, (a.1.max(b.1) / cell).floor() as i32);
-            if (x1 - x0 + 1) * (y1 - y0 + 1) > 4096 {
-                continue;
-            }
-            for gx in x0..=x1 {
-                for gy in y0..=y1 {
-                    grid.entry((gx, gy)).or_default().push((i, k));
+        let class = gaps[i].max(1e-3).log2().floor() as i32;
+        for c in [class, class + 1] {
+            let cell = 2f32.powi(c + 1) * 64.0;
+            for k in 0..p.len().saturating_sub(1) {
+                let (a, b) = (p[k], p[k + 1]);
+                let (x0, x1) = ((a.0.min(b.0) / cell).floor() as i32, (a.0.max(b.0) / cell).floor() as i32);
+                let (y0, y1) = ((a.1.min(b.1) / cell).floor() as i32, (a.1.max(b.1) / cell).floor() as i32);
+                if (x1 as i64 - x0 as i64 + 1) * (y1 as i64 - y0 as i64 + 1) > 4096 {
+                    continue;
+                }
+                for gx in x0..=x1 {
+                    for gy in y0..=y1 {
+                        grid.entry((c, gx, gy)).or_default().push((i, k));
+                    }
                 }
             }
         }

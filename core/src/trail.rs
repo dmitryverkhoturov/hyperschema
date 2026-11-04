@@ -17,7 +17,7 @@ use std::time::Instant;
 pub type Off = (f32, f32);
 
 /// How long concepts take to slide out or back.
-pub const EASE_MS: f64 = 250.0;
+pub const EASE_MS: f64 = 650.0;
 
 /// How neighbours are laid out around the current concept.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -388,6 +388,17 @@ impl Trail {
         d
     }
 
+    /// Moves `ids` in `d` (a board as drawn, from `display`) to their poses.
+    pub fn pose_all(&self, b: &Board, d: &mut Board, ids: &HashSet<String>) {
+        for id in ids {
+            let (Some(n), p) = (b.get(id), self.pose_in(&self.shown, b, id)) else { continue };
+            let (x, y, w, h, f) = (n.x + p.dx, n.y + p.dy, n.w + p.dw, n.h + p.dh, n.font + p.df);
+            if let Some(m) = d.get_mut(id) {
+                (m.x, m.y, m.w, m.h, m.font) = (x, y, w, h, f);
+            }
+        }
+    }
+
     /// Concepts whose drawn place differs from the board (their connections
     /// need routing while they slide).
     pub fn moving(&self) -> HashSet<String> {
@@ -636,7 +647,8 @@ impl Trail {
     pub fn tick(&mut self) -> bool {
         let Some(start) = self.start else { return false };
         let t = (start.elapsed().as_secs_f64() * 1000.0 / EASE_MS).min(1.0) as f32;
-        let e = 1.0 - (1.0 - t).powi(3);
+        // Slow in and out: where each one comes from stays readable.
+        let e = if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 };
         for (id, f) in &self.from {
             let to = self.off.get(id).copied().unwrap_or_default();
             self.shown.insert(id.clone(), Pose::lerp(*f, to, e));
