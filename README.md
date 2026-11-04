@@ -1,8 +1,74 @@
 # Hyperschema
 
-Infinite whiteboard engine: Rust core (wgpu) + thin native shells.
+An infinite board for thinking: notes, frames inside frames, arrows between
+them — and it stays smooth when the board gets huge.
 
-- `core/` — scene, Morton quadtree index, camera, GPU renderer, glyph atlas, Excalidraw import.
-- `desktop/` — Windows shell (winit). `hyperschema.exe [file.excalidraw(.md)]`, `--bench N`, `--autobench`, `--shot out.png --cam x,y,scale`.
+<!-- VIDEO: flight over 100 000 concepts -->
 
-Controls: touchpad two-finger scroll = pan, pinch / Ctrl+wheel = zoom, mouse wheel = zoom, drag = pan, F/Home = fit, B = benchmark.
+I keep everything I think about on one board: projects, plans, research,
+a diary. On Excalidraw that board started to stutter at about 500
+elements. Hyperschema is the replacement: a Rust core that draws on the GPU,
+thin native shells for Windows and Android, and a board format where nesting
+and links are first-class.
+
+## What it does
+
+- **Huge boards stay smooth.** The video above flies over 100 000 concepts
+  and 64 000 links on a 2014 laptop. Each level of nesting is several times
+  smaller than the one holding it, so the camera goes from the whole board
+  down to a single note across six orders of magnitude.
+- **Frames inside frames.** A concept can hold other concepts; moving or
+  scaling it carries them along. Text stays readable as far out as it can,
+  then turns into soft bars instead of vanishing.
+- **Path mode: walk the board along its links.** Select a note and press
+  *Path*: what it links to slides out next to it, everything else dims. Step
+  from note to note; what you looked at stays out, whichever way you go.
+  Step into a frame and what it holds comes out at one scale. Esc slides
+  everything home. Walks are remembered: open the same note again and the
+  same walk comes back.
+- **Sync between devices.** Boards merge edits from a laptop, a phone and
+  scripts within a second or two (Automerge documents over CouchDB).
+- **A command line for agents.** `hyperschema add / link / move / show …`
+  edits boards from scripts and AI agents, with the same sync.
+- **Excalidraw import**, including Obsidian `.excalidraw.md` files.
+- **Mouse, touchpad and touch** from the start.
+
+<!-- VIDEO: path mode -->
+
+## Performance
+
+Measured on a 2014 laptop: Intel HD 4400 + GeForce 840M, 60 Hz screen.
+The board is generated to look like a hand-made one
+(`cargo run --release -p hs-core --example gen_board -- 100000 big.hyperschema`).
+
+<!-- TABLE: filled in from bench-result.txt -->
+
+Reproduce: `hyperschema big.hyperschema --tour --hud` flies the camera over
+the board, then writes `bench-result.txt` and a per-frame `bench-frames.csv`.
+
+## Build
+
+Requirements: Rust (stable). Android: Android SDK, NDK 28, JDK 17.
+
+```bash
+cargo build --profile dist -p hyperschema
+```
+
+The Windows build is `target/dist/hyperschema.exe`. Android:
+`bash tools/build-android.sh` (APK in `shell-android/app/build/outputs/apk/release/`).
+
+## Project
+
+- `core/` — everything shared: board model, editor, touch gestures, path
+  mode, routing of links, sync, and the wgpu renderer (Morton quadtree,
+  glyph atlas, camera in double precision).
+- `desktop/` — Windows shell (winit, own title strip, DirectManipulation
+  touchpad), command line for agents, scripted input for tests and demos.
+- `android/`, `shell-android/` — Android shell (Kotlin) over the same core.
+- `docs/demo/` — the board and script behind the path-mode video.
+
+The interface is in Russian for now; English is next.
+
+## License
+
+<!-- LICENSE: to be chosen -->
