@@ -37,6 +37,14 @@ pub enum Request {
 }
 
 /// Fill colours offered for concepts (none first): name, colour.
+/// Names of PALETTE colours in Russian, same order.
+const PALETTE_RU: [&str; 8] = ["Без заливки", "Серый", "Красный", "Оранжевый", "Жёлтый", "Зелёный", "Голубой", "Фиолетовый"];
+
+/// Name of `PALETTE[k]` in the interface language.
+pub fn color_name(k: usize) -> &'static str {
+    if crate::i18n::russian() { PALETTE_RU[k] } else { PALETTE[k].0 }
+}
+
 pub const PALETTE: [(&str, Option<&str>); 8] = [
     ("No fill", None),
     ("Grey", Some("#e9ecef")),
@@ -1083,7 +1091,7 @@ impl Editor {
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let name = |id: &str| {
             let t = self.board.get(id).map_or(String::new(), |n| n.text.split('\n').next().unwrap_or("").trim().to_string());
-            let t = if t.is_empty() { "untitled".to_string() } else { t };
+            let t = if t.is_empty() { crate::i18n::tr("untitled", "без названия").to_string() } else { t };
             if t.chars().count() > 18 {
                 format!("{}…", t.chars().take(17).collect::<String>())
             } else {

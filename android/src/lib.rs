@@ -167,6 +167,12 @@ pub extern "system" fn Java_com_hyperschema_app_Native_searchClose(_env: JNIEnv,
     app(h).ed.search_close();
 }
 
+/// Interface language of the core (colour names, path layouts, …).
+#[no_mangle]
+pub extern "system" fn Java_com_hyperschema_app_Native_setRussian(_env: JNIEnv, _c: JClass, on: jni::sys::jboolean) {
+    hs_core::i18n::set_russian(on != 0);
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_hyperschema_app_Native_create(env: JNIEnv, _c: JClass, surface: JObject, w: jint, h: jint, density: jfloat) -> jlong {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -496,7 +502,7 @@ pub extern "system" fn Java_com_hyperschema_app_Native_createCenter(_env: JNIEnv
 pub extern "system" fn Java_com_hyperschema_app_Native_stats(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
     let a = app(h);
     let links = a.ed.board.edges.iter().filter(|e| e.kind == Kind::Link).count();
-    let msg = format!("{} concepts · {} links", a.ed.board.nodes.len(), links);
+    let msg = format!("{} {} · {} {}", a.ed.board.nodes.len(), hs_core::i18n::tr("concepts", "концептов"), links, hs_core::i18n::tr("links", "связей"));
     out(&mut env, Some(msg))
 }
 

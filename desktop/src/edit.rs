@@ -109,7 +109,7 @@ impl State {
         match self.ed.request.take() {
             Some(Request::NodeMenu { x, y }) => self.node_menu(x, y),
             Some(Request::CanvasMenu { x, y }) => {
-                let items = vec![(CANVAS_NEW, "New concept here".to_string(), false), (1, "Paste\tCtrl+V".to_string(), false)];
+                let items = vec![(CANVAS_NEW, hs_core::i18n::tr("New concept here", "Новый блок здесь").to_string(), false), (1, hs_core::i18n::tr("Paste\tCtrl+V", "Вставить\tCtrl+V").to_string(), false)];
                 match self.menu_choice(x, y, &items) {
                     1 => self.paste(),
                     c => self.ed.apply_node_choice(c),
@@ -146,14 +146,14 @@ impl State {
     fn node_menu(&mut self, x: f64, y: f64) {
         let sel: Vec<_> = self.ed.sel.iter().filter_map(|id| self.ed.board.get(id).cloned()).collect();
         let Some(first) = sel.first() else { return };
-        let mut items = vec![(-2, "Colour".to_string(), false)];
-        for (k, (name, c)) in PALETTE.iter().enumerate() {
-            items.push((NODE_COLOR + k as i32, name.to_string(), first.fill.as_deref() == *c));
+        let mut items = vec![(-2, hs_core::i18n::tr("Colour", "Цвет").to_string(), false)];
+        for (k, (_, c)) in PALETTE.iter().enumerate() {
+            items.push((NODE_COLOR + k as i32, hs_core::editor::color_name(k).to_string(), first.fill.as_deref() == *c));
         }
         items.push((-1, String::new(), false));
-        items.push((-2, "Shape".to_string(), false));
+        items.push((-2, hs_core::i18n::tr("Shape", "Форма").to_string(), false));
         let parent = sel.iter().any(|n| self.ed.board.has_children(&n.id));
-        for (k, (name, shape)) in [("Rectangle", NShape::Box), ("Ellipse", NShape::Ellipse), ("Diamond", NShape::Diamond), ("Text only", NShape::Text)].into_iter().enumerate() {
+        for (k, (name, shape)) in [(hs_core::i18n::tr("Rectangle", "Прямоугольник"), NShape::Box), (hs_core::i18n::tr("Ellipse", "Овал"), NShape::Ellipse), (hs_core::i18n::tr("Diamond", "Ромб"), NShape::Diamond), (hs_core::i18n::tr("Text only", "Текст без рамки"), NShape::Text)].into_iter().enumerate() {
             if shape == NShape::Text && parent {
                 continue;
             }
@@ -162,22 +162,22 @@ impl State {
         items.push((-1, String::new(), false));
         items.push((0, String::new(), false));
         if sel.len() == 1 {
-            items.push((NODE_EDIT, "Edit text\tEnter".to_string(), false));
+            items.push((NODE_EDIT, hs_core::i18n::tr("Edit text\tEnter", "Изменить текст\tEnter").to_string(), false));
             if self.ed.path_active() {
                 if self.ed.path_closable(&first.id) {
-                    items.push((NODE_CLOSE, "Remove from path".to_string(), false));
+                    items.push((NODE_CLOSE, hs_core::i18n::tr("Remove from path", "Убрать из пути").to_string(), false));
                 }
             } else {
-                items.push((NODE_PATH, "Path along links\tP".to_string(), false));
+                items.push((NODE_PATH, hs_core::i18n::tr("Path along links\tP", "Путь по связям\tP").to_string(), false));
             }
         }
-        items.push((NODE_DUPLICATE, "Duplicate\tCtrl+D".to_string(), false));
-        items.push((1, "Copy\tCtrl+C".to_string(), false));
-        items.push((NODE_WRAP, "Wrap in a concept\tCtrl+G".to_string(), false));
+        items.push((NODE_DUPLICATE, hs_core::i18n::tr("Duplicate\tCtrl+D", "Дублировать\tCtrl+D").to_string(), false));
+        items.push((1, hs_core::i18n::tr("Copy\tCtrl+C", "Копировать\tCtrl+C").to_string(), false));
+        items.push((NODE_WRAP, hs_core::i18n::tr("Wrap in a concept\tCtrl+G", "Обернуть в блок\tCtrl+G").to_string(), false));
         items.push((0, String::new(), false));
-        items.push((NODE_DELETE, "Delete\tDel".to_string(), false));
+        items.push((NODE_DELETE, hs_core::i18n::tr("Delete\tDel", "Удалить\tDel").to_string(), false));
         if parent {
-            items.push((NODE_DELETE_DEEP, "Delete with contents\tShift+Del".to_string(), false));
+            items.push((NODE_DELETE_DEEP, hs_core::i18n::tr("Delete with contents\tShift+Del", "Удалить с содержимым\tShift+Del").to_string(), false));
         }
         match self.menu_choice(x, y, &items) {
             1 => self.copy(false),
@@ -189,13 +189,13 @@ impl State {
         {
             let Some(e) = self.ed.board.edge(&edge).cloned() else { return };
             let items = vec![
-                (1, "No direction".to_string(), !e.arrow_from && !e.arrow_to),
-                (2, "→  Forward".to_string(), !e.arrow_from && e.arrow_to),
-                (3, "←  Back".to_string(), e.arrow_from && !e.arrow_to),
-                (4, "↔  Both ways".to_string(), e.arrow_from && e.arrow_to),
+                (1, hs_core::i18n::tr("No direction", "Без направления").to_string(), !e.arrow_from && !e.arrow_to),
+                (2, hs_core::i18n::tr("→  Forward", "→  Вперёд").to_string(), !e.arrow_from && e.arrow_to),
+                (3, hs_core::i18n::tr("←  Back", "←  Назад").to_string(), e.arrow_from && !e.arrow_to),
+                (4, hs_core::i18n::tr("↔  Both ways", "↔  В обе стороны").to_string(), e.arrow_from && e.arrow_to),
                 (0, String::new(), false),
-                (5, "Label…".to_string(), false),
-                (6, "Delete link".to_string(), false),
+                (5, hs_core::i18n::tr("Label…", "Подпись…").to_string(), false),
+                (6, hs_core::i18n::tr("Delete link", "Удалить связь").to_string(), false),
             ];
             let choice = self.menu_choice(x, y, &items);
             self.ed.apply_edge_choice(&edge, choice);

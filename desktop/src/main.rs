@@ -992,8 +992,21 @@ impl App {
     }
 }
 
+/// Russian interface when the user's Windows display language is Russian
+/// (HS_LANG=en|ru overrides, for screenshots).
+fn system_russian() -> bool {
+    match std::env::var("HS_LANG").as_deref() {
+        Ok("ru") => return true,
+        Ok("en") => return false,
+        _ => {}
+    }
+    let lang = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+    lang & 0x3ff == 0x19 // LANG_RUSSIAN
+}
+
 fn main() {
     log_panics();
+    hs_core::i18n::set_russian(system_russian());
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| cli::COMMANDS.contains(&a.as_str())) {
         std::process::exit(cli::run(args));

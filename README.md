@@ -34,8 +34,42 @@ and links are first-class.
   edits boards from scripts and AI agents, with the same sync.
 - **Excalidraw import**, including Obsidian `.excalidraw.md` files.
 - **Mouse, touchpad and touch** from the start.
+- **Windows and Android**, one Rust core under both. English, or Russian
+  when the system is in Russian.
 
 <!-- VIDEO: path mode -->
+
+## Screenshots
+
+| Windows: a board | Windows: path mode |
+|---|---|
+| ![A mind map board on Windows](docs/windows-board.png) | ![Path mode on Windows: a walk from the root into Benchmarks](docs/windows-path.png) |
+
+<p align="center"><img src="docs/android.png" alt="Hyperschema on Android" width="320"></p>
+
+## Sync
+
+Sync is optional: without it every board lives on its device. With it, all
+devices share one CouchDB database. Each board is an Automerge document;
+devices only ever add batches of changes (`chg:` documents) and never
+rewrite each other's, so the database never conflicts and merging is
+Automerge's job. Edits from another device show up within a second or two.
+
+1. Run CouchDB 3 somewhere all your devices can reach (behind HTTPS) and
+   create a database (`hyperschema` by default) and a user that can write
+   to it.
+2. Give each device the connection, a small JSON:
+
+   ```json
+   {"url": "https://couch.example.com", "db": "hyperschema", "user": "…", "password": "…"}
+   ```
+
+   Windows: save it as `%APPDATA%\Hyperschema\sync.json`. Android: menu →
+   *Sync server…*, paste it there.
+
+The connection stays on the device; nothing about the server is built into
+the app. The command line (`hyperschema help`) uses the same file, so
+scripts and AI agents edit the same boards and their edits sync too.
 
 ## Performance
 

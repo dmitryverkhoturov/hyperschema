@@ -8,6 +8,8 @@ object Native {
         System.loadLibrary("hs_android")
     }
 
+    /** Interface language of the Rust core: Russian or English. */
+    external fun setRussian(on: Boolean)
     external fun create(surface: Surface, w: Int, h: Int, density: Float): Long
     external fun attach(h: Long, surface: Surface, w: Int, hgt: Int)
     external fun detach(h: Long)
@@ -64,3 +66,8 @@ object Native {
     /** 1: board changed (redraw); 2: server out of reach. */
     external fun syncPoll(h: Long): Int
 }
+
+/** Russian interface when the device is in Russian; English otherwise. */
+var russian = false
+
+fun tr(en: String, ru: String) = if (russian) ru else en

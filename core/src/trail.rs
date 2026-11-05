@@ -45,10 +45,10 @@ impl Layout {
 
     pub fn name(self) -> &'static str {
         match self {
-            Layout::Map => "Map",
-            Layout::Near => "Near",
-            Layout::Right => "Tree →",
-            Layout::Down => "Tree ↓",
+            Layout::Map => crate::i18n::tr("Map", "Карта"),
+            Layout::Near => crate::i18n::tr("Near", "Рядом"),
+            Layout::Right => crate::i18n::tr("Tree →", "Дерево →"),
+            Layout::Down => crate::i18n::tr("Tree ↓", "Дерево ↓"),
         }
     }
 

@@ -10,6 +10,7 @@ pub mod editor;
 pub mod engine;
 pub mod excalidraw;
 pub mod history;
+pub mod i18n;
 pub mod import;
 pub mod route;
 pub mod scene;
