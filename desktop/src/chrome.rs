@@ -41,7 +41,7 @@ pub fn cursor_client() -> Option<(f64, f64)> {
 }
 
 pub fn menu_just_closed() -> bool {
-    MENU_CLOSED.lock().ok().and_then(|g| *g).is_some_and(|t| t.elapsed().as_millis() < 250)
+    MENU_CLOSED.lock().ok().and_then(|g| *g).is_some_and(|t| hs_core::clock::since(t).as_millis() < 250)
 }
 
 fn scale() -> f64 {
@@ -306,7 +306,7 @@ pub fn popup(x: f64, y: f64, items: &[(i32, String, bool)]) -> i32 {
         let _ = PostMessageW(Some(hwnd()), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(root);
         if let Ok(mut g) = MENU_CLOSED.lock() {
-            *g = Some(std::time::Instant::now());
+            *g = Some(hs_core::clock::now());
         }
         r.0
     }

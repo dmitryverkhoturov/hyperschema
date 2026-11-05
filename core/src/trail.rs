@@ -640,13 +640,13 @@ impl Trail {
         for id in self.off.keys() {
             self.shown.entry(id.clone()).or_default();
         }
-        self.start = Some(Instant::now());
+        self.start = Some(crate::clock::now());
     }
 
     /// Moves the drawn poses along; true while something slides.
     pub fn tick(&mut self) -> bool {
         let Some(start) = self.start else { return false };
-        let t = (start.elapsed().as_secs_f64() * 1000.0 / EASE_MS).min(1.0) as f32;
+        let t = (crate::clock::since(start).as_secs_f64() * 1000.0 / EASE_MS).min(1.0) as f32;
         // Slow in and out: where each one comes from stays readable.
         let e = if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 };
         for (id, f) in &self.from {

@@ -4,7 +4,7 @@
 //!
 //! Usage: hyperschema [file.hyperschema | file.excalidraw(.md)]
 //! Dev:   --bench N | --autobench | --tour [--hud] (file: camera tour, stats, exit) | --pointer (with --script) | --fullscreen | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
-//!        --script steps.txt (see script.rs)
+//!        --script steps.txt (see script.rs) | --record out.mp4 (with --tour or --script: render frame by frame, 1600x900 60 fps)
 
 #![windows_subsystem = "windows"]
 
@@ -13,6 +13,7 @@ mod cli;
 mod clip;
 mod dm;
 mod edit;
+mod record;
 mod script;
 mod tour;
 mod store;
@@ -47,12 +48,13 @@ struct Args {
     shot: Option<String>,
     script: Option<String>,
     cam: Option<(f64, f64, f64)>,
+    record: Option<String>,
 }
 
 fn parse_args() -> Args {
     // The discrete GPU by default: the 2016 Intel OpenGL driver on this
     // laptop crashes (access violation in ig75icd64.dll).
-    let mut a = Args { bench: None, file: None, autobench: false, tour: false, hud: false, pointer: false, fullscreen: false, vsync: false, high_perf: true, shot: None, script: None, cam: None };
+    let mut a = Args { bench: None, file: None, autobench: false, tour: false, hud: false, pointer: false, fullscreen: false, vsync: false, high_perf: true, shot: None, script: None, cam: None, record: None };
     let mut it = std::env::args().skip(1);
     while let Some(s) = it.next() {
         match s.as_str() {
@@ -66,6 +68,7 @@ fn parse_args() -> Args {
             "--gpu" => a.high_perf = it.next().as_deref() != Some("low"),
             "--shot" => a.shot = it.next(),
             "--script" => a.script = it.next(),
+            "--record" => a.record = it.next(),
             "--cam" => {
                 let v: Vec<f64> = it.next().unwrap_or_default().split(',').filter_map(|x| x.parse().ok()).collect();
                 if v.len() == 3 {
@@ -215,6 +218,8 @@ pub struct State {
     caption: String,
     /// `--hud`: concepts, links and frame rate in a corner.
     hud: bool,
+    /// `--record`: frames go to a video file instead of the window.
+    rec: Option<record::Recorder>,
     auto: Option<AutoBench>,
     frame_interval: Duration,
     last_frame: Instant,
@@ -281,7 +286,7 @@ impl State {
     fn start_bench(&mut self) {
         self.ed.engine.fit();
         let c = self.ed.engine.cam;
-        self.auto = Some(AutoBench { start: Instant::now(), from: (c.cx, c.cy, c.s), last: None, intervals: Vec::new(), cpu: Vec::new(), text: Vec::new(), rows: Vec::new(), tour: None });
+        self.auto = Some(AutoBench { start: hs_core::clock::now(), from: (c.cx, c.cy, c.s), last: None, intervals: Vec::new(), cpu: Vec::new(), text: Vec::new(), rows: Vec::new(), tour: None });
     }
 
     fn start_tour(&mut self) {
@@ -303,7 +308,7 @@ impl State {
             (cam.cx, cam.cy, cam.s) = (x, y, s);
             return true;
         }
-        let t = b.start.elapsed().as_secs_f64();
+        let t = hs_core::clock::since(b.start).as_secs_f64();
         let (cx, cy, s0) = b.from;
         let deep = 1.5f64;
         let cam = &mut self.ed.engine.cam;
@@ -330,6 +335,9 @@ impl State {
 
     fn finish_bench(&mut self) {
         let Some(b) = self.auto.take() else { return };
+        if self.rec.is_some() {
+            return;
+        }
         let mut iv = b.intervals.clone();
         iv.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = iv.len().max(1);
@@ -359,6 +367,30 @@ impl State {
         );
         let _ = std::fs::write("bench-result.txt", &report);
         let _ = std::fs::write("bench-frames.csv", format!("t,interval,scale,rects,lines,glyphs,cpu,text\n{}", b.rows.join("\n")));
+    }
+
+    /// One frame of `--record`; false when the tour or script is over.
+    fn record_frame(&mut self) -> bool {
+        let Some(r) = &self.rec else { return false };
+        r.tick();
+        if self.script.is_some() && !self.script_step() {
+            return false;
+        }
+        let ms = hs_core::clock::since(self.started).as_millis() as u64;
+        self.fingers.tick(&mut self.ed, ms);
+        if self.auto.is_some() && !self.step_bench() {
+            return false;
+        }
+        if self.script.is_none() && self.auto.is_none() {
+            return false;
+        }
+        self.refresh_overlay();
+        if self.ed.engine.size() != (record::W, record::H) {
+            self.ed.engine.resize(record::W, record::H);
+        }
+        let (_, _, rgba) = self.ed.engine.capture();
+        self.rec.as_mut().unwrap().push(&rgba);
+        true
     }
 
     fn quit(&mut self, el: &ActiveEventLoop) {
@@ -454,10 +486,10 @@ impl ApplicationHandler for App {
             dm,
             fingers: Touch::new(scale),
             menu_finger: None,
-            started: Instant::now(),
+            started: hs_core::clock::now(),
             mods: ModifiersState::default(),
             cursor_in: false,
-            touchpad_until: Instant::now(),
+            touchpad_until: hs_core::clock::now(),
             lib: store::library(dev_run()),
             live: None,
             proxy: self.proxy.clone(),
@@ -475,9 +507,10 @@ impl ApplicationHandler for App {
             pressed_at: None,
             caption: String::new(),
             hud: self.args.hud,
+            rec: None,
             auto: None,
             frame_interval,
-            last_frame: Instant::now() - Duration::from_secs(1),
+            last_frame: hs_core::clock::now() - Duration::from_secs(1),
             pending: false,
             shown: false,
             restore,
@@ -506,12 +539,12 @@ impl ApplicationHandler for App {
             // Straight from the file: no library, nothing saved.
             let p = self.args.file.clone().unwrap_or_default();
             if let Ok(b) = std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| hs_core::board::Board::parse(&t)) {
-                let t0 = Instant::now();
+                let t0 = hs_core::clock::now();
                 st.ed.board = b;
                 st.ed.rebuild();
                 st.ed.engine.fit();
                 st.name = store::stem(&p);
-                crate::dlog(format!("tour: board built in {:?}", t0.elapsed()));
+                crate::dlog(format!("tour: board built in {:?}", hs_core::clock::since(t0)));
             }
         } else {
             match self.args.file.clone() {
@@ -534,7 +567,21 @@ impl ApplicationHandler for App {
         if self.args.autobench {
             st.start_bench();
         }
-        if self.args.fullscreen {
+        if let Some(out) = &self.args.record {
+            // Off-screen at a fixed size; the window stays cloaked.
+            st.ed.engine.detach_surface();
+            st.ed.engine.resize(record::W, record::H);
+            chrome::set_metrics(st.window.scale_factor(), record::W);
+            st.ed.engine.fit();
+            match record::Recorder::start(out) {
+                Ok(r) => st.rec = Some(r),
+                Err(_) => {
+                    el.exit();
+                    return;
+                }
+            }
+        }
+        if self.args.fullscreen && self.args.record.is_none() {
             st.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
             let sz = st.window.inner_size();
             st.ed.engine.resize(sz.width, sz.height);
@@ -551,6 +598,7 @@ impl ApplicationHandler for App {
         let Some(st) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => st.quit(el),
+            WindowEvent::Resized(_) if st.rec.is_some() => {}
             WindowEvent::Resized(sz) => {
                 st.ed.engine.resize(sz.width, sz.height);
                 chrome::set_metrics(st.window.scale_factor(), sz.width);
@@ -575,7 +623,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } if from_touch() => {}
             WindowEvent::Touch(t) => {
                 use winit::event::TouchPhase;
-                let ms = st.started.elapsed().as_millis() as u64;
+                let ms = hs_core::clock::since(st.started).as_millis() as u64;
                 let (x, y) = (t.location.x, t.location.y);
                 match t.phase {
                     // A finger on the menu button opens the menu when lifted.
@@ -658,9 +706,9 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(dx, dy) => {
                         let fractional = dx.fract() != 0.0 || dy.fract() != 0.0 || dx != 0.0;
                         if fractional {
-                            st.touchpad_until = Instant::now() + Duration::from_millis(400);
+                            st.touchpad_until = hs_core::clock::now() + Duration::from_millis(400);
                         }
-                        let touchpad = Instant::now() < st.touchpad_until;
+                        let touchpad = hs_core::clock::now() < st.touchpad_until;
                         if touchpad && !st.mods.control_key() {
                             st.ed.engine.pan(dx as f64 * 60.0, dy as f64 * 60.0);
                         } else {
@@ -839,12 +887,15 @@ impl ApplicationHandler for App {
                 st.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                if st.rec.is_some() {
+                    return;
+                }
                 let next = st.last_frame + st.frame_interval;
-                if !self.args.vsync && st.shown && Instant::now() + Duration::from_micros(500) < next {
+                if !self.args.vsync && st.shown && hs_core::clock::now() + Duration::from_micros(500) < next {
                     st.pending = true;
                     return;
                 }
-                st.last_frame = Instant::now();
+                st.last_frame = hs_core::clock::now();
                 let mut touchpad_busy = false;
                 if let Some(dm) = &st.dm {
                     for g in dm.poll() {
@@ -862,7 +913,7 @@ impl ApplicationHandler for App {
                     }
                     st.window.request_redraw();
                 }
-                let ms = st.started.elapsed().as_millis() as u64;
+                let ms = hs_core::clock::since(st.started).as_millis() as u64;
                 let gliding = st.fingers.tick(&mut st.ed, ms);
                 let benching = st.step_bench();
                 if !benching && st.auto.is_some() {
@@ -878,7 +929,7 @@ impl ApplicationHandler for App {
                     st.shown = true;
                     chrome::cloak(false);
                 }
-                let now = Instant::now();
+                let now = hs_core::clock::now();
                 if let Some(b) = &mut st.auto {
                     if let Some(last) = b.last {
                         let s = st.ed.engine.stats;
@@ -887,7 +938,7 @@ impl ApplicationHandler for App {
                         b.text.push(s.text_ms);
                         b.rows.push(format!(
                             "{:.2},{:.2},{:.5},{},{},{},{:.2},{:.2}",
-                            b.start.elapsed().as_secs_f32(),
+                            hs_core::clock::since(b.start).as_secs_f32(),
                             (now - last).as_secs_f32() * 1000.0,
                             st.ed.engine.cam.s,
                             s.rects,
@@ -911,11 +962,23 @@ impl ApplicationHandler for App {
 impl App {
     fn wake(&mut self, el: &ActiveEventLoop) {
         let Some(st) = &mut self.state else { return };
+        if st.rec.is_some() {
+            if !st.record_frame() {
+                st.finish_bench();
+                if let Some(r) = st.rec.take() {
+                    r.finish();
+                }
+                st.quit(el);
+                return;
+            }
+            el.set_control_flow(ControlFlow::Poll);
+            return;
+        }
         st.maybe_save();
         let mut until = st.save_at;
         if st.pending {
             let next = st.last_frame + st.frame_interval;
-            if Instant::now() + Duration::from_micros(500) >= next {
+            if hs_core::clock::now() + Duration::from_micros(500) >= next {
                 st.pending = false;
                 st.window.request_redraw();
             } else {
@@ -938,7 +1001,7 @@ fn main() {
     let el = EventLoop::<()>::with_user_event().build().expect("event loop");
     el.set_control_flow(ControlFlow::Wait);
     let args = parse_args();
-    let _ = DEV_RUN.set(args.script.is_some() || args.shot.is_some() || args.autobench || args.tour || args.bench.is_some());
+    let _ = DEV_RUN.set(args.record.is_some() || args.script.is_some() || args.shot.is_some() || args.autobench || args.tour || args.bench.is_some());
     let mut app = App { args, state: None, proxy: el.create_proxy() };
     el.run_app(&mut app).expect("run");
 }

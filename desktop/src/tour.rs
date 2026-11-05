@@ -96,12 +96,12 @@ impl Tour {
                 legs.push(Leg { a: b, b, secs: 1.4 });
             }
         }
-        Tour { legs, start: Instant::now() }
+        Tour { legs, start: hs_core::clock::now() }
     }
 
     /// The camera (centre, scale) now; None when the tour is over.
     pub fn camera(&self, screen_w: u32) -> Option<(f64, f64, f64)> {
-        let mut t = self.start.elapsed().as_secs_f64();
+        let mut t = hs_core::clock::since(self.start).as_secs_f64();
         for l in &self.legs {
             if t <= l.secs {
                 let k = t / l.secs;

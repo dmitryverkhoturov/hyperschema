@@ -13,7 +13,7 @@ use hs_core::scene::{rgba, Align, Label, Line, Rect, Scene, Shape};
 use hs_core::sync::{heads_of, Step};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 pub const EXT: &str = "hyperschema";
 const SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -222,14 +222,14 @@ impl State {
             c.t = now_ms();
         }
         self.unsaved.push(c);
-        self.save_at = Some(Instant::now() + SAVE_DELAY);
+        self.save_at = Some(hs_core::clock::now() + SAVE_DELAY);
     }
 
     /// Saves now if a save is due and nothing is mid-gesture; takes in
     /// changes from other devices that waited for the gesture to end.
     pub fn maybe_save(&mut self) {
         let idle = matches!(self.ed.mode, Mode::Idle);
-        if self.save_at.is_some_and(|t| Instant::now() >= t) && idle {
+        if self.save_at.is_some_and(|t| hs_core::clock::now() >= t) && idle {
             self.flush();
         }
         if self.remote_waiting && idle && self.unsaved.is_empty() {
@@ -251,7 +251,7 @@ impl State {
             Err(e) => {
                 crate::dlog(format!("save failed: {e}"));
                 self.name = format!("{} · не сохранено", live.name);
-                self.save_at = Some(Instant::now() + Duration::from_secs(5));
+                self.save_at = Some(hs_core::clock::now() + Duration::from_secs(5));
             }
         }
     }
@@ -581,7 +581,7 @@ impl State {
             let shown = if sr.query.is_empty() { "Поиск по схеме".to_string() } else { sr.query.clone() };
             let color = if sr.query.is_empty() { rgba(0, 0, 0, 90) } else { ink };
             let label = Label { x: tx, y: ty, w: bw - 110.0 * s, size, color, align: Align::Left, wrap: false, text: shown };
-            if (self.started.elapsed().as_millis() / 530) % 2 == 0 {
+            if (hs_core::clock::since(self.started).as_millis() / 530) % 2 == 0 {
                 let cx = if sr.query.is_empty() { tx } else { tx + self.ed.engine.measure(&sr.query, size).0 };
                 ui.rects.push(Rect { x: cx, y: ty, w: 1.5 * s, h: size * hs_core::text::LINE_H, fill: rgba(0x4a, 0x7d, 0xff, 255), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
             }
@@ -631,7 +631,7 @@ impl State {
         if self.pointer {
             let (x, y) = (self.ed.cursor.x as f32, self.ed.cursor.y as f32);
             if let Some((px, py, t)) = self.pressed_at {
-                let k = t.elapsed().as_secs_f32() / 0.5;
+                let k = hs_core::clock::since(t).as_secs_f32() / 0.5;
                 if k < 1.0 {
                     let r = (10.0 + 22.0 * k) * s;
                     let a = (150.0 * (1.0 - k)) as u8;
@@ -669,7 +669,7 @@ impl State {
                 o
             };
             let mut text = format!("{} concepts · {} links", sep(b.nodes.len()), sep(links));
-            if let Some(f) = fps.filter(|f| *f > 0.0) {
+            if let Some(f) = fps.filter(|f| *f > 0.0 && self.rec.is_none()) {
                 text.push_str(&format!(" · {f:.0} fps"));
             }
             let size = 15.0 * s;

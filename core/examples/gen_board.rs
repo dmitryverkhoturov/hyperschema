@@ -34,9 +34,11 @@ impl Rng {
     }
 }
 
+/// Names of the top-level frames, one per region of the world.
+const REGIONS: &[&str] = &["Workshop", "Library", "Observatory", "Harbor", "Atelier", "Lighthouse"];
 const PROJECTS: &[&str] = &[
     "Getting paid", "Job search", "Hyperschema", "Diary", "Reading list", "Health", "Side projects", "Research",
-    "Trading bot", "Calendar app", "Home", "Learning Rust", "Travel 2027", "Writing", "Agents", "Music",
+    "Trading bot", "Calendar app", "Home", "Learning Rust", "Travel", "Writing", "Agents", "Music",
     "Finances", "Family", "Startup ideas", "Talks", "Open source", "Garden", "Photography", "Fitness",
 ];
 const AREAS: &[&str] = &[
@@ -236,7 +238,7 @@ fn main() {
     let mut all_heads: Vec<(usize, f32)> = Vec::new();
     let mut parts = Vec::new();
     for k in 0..regions {
-        let title = format!("{} {}", ["Life", "Work", "Projects", "Archive", "Learning", "Someday"][k % 6], 2026 - (k / 6) as i32);
+        let title = REGIONS[k % REGIONS.len()].to_string();
         parts.push(g.frame(title, 400_000.0, total / regions, 0));
     }
     let gap = 300_000.0;

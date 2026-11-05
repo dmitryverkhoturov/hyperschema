@@ -44,7 +44,7 @@ impl State {
     pub fn script_step(&mut self) -> bool {
         let busy = self.ed.animating() && !self.editing_text();
         let Some(sc) = &mut self.script else { return false };
-        if sc.until.is_some_and(|u| std::time::Instant::now() < u) {
+        if sc.until.is_some_and(|u| hs_core::clock::now() < u) {
             return true;
         }
         sc.until = None;
@@ -61,7 +61,7 @@ impl State {
             let _ = std::fs::write(&sc.log, &sc.out);
             return false;
         };
-        let started = std::time::Instant::now();
+        let started = hs_core::clock::now();
         let w: Vec<&str> = line.split_whitespace().collect();
         let n = |i: usize| w.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let has = |k: &str| w.iter().skip(1).any(|x| *x == k);
@@ -70,7 +70,7 @@ impl State {
         match w.first().copied().unwrap_or("") {
             "move" => self.move_to(PhysicalPosition::new(n(1), n(2))),
             "down" => {
-                self.pressed_at = Some((self.ed.cursor.x, self.ed.cursor.y, std::time::Instant::now()));
+                self.pressed_at = Some((self.ed.cursor.x, self.ed.cursor.y, hs_core::clock::now()));
                 if has("shift") {
                     self.mods = ModifiersState::SHIFT;
                 }
@@ -191,8 +191,8 @@ impl State {
             },
             "wait" => {
                 // Sync keeps going while a script waits.
-                let until = std::time::Instant::now() + std::time::Duration::from_millis(n(1) as u64);
-                while std::time::Instant::now() < until {
+                let until = hs_core::clock::now() + std::time::Duration::from_millis(n(1) as u64);
+                while hs_core::clock::now() < until {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                     self.on_sync();
                     self.maybe_save();
@@ -203,7 +203,7 @@ impl State {
                 None => note = "layouts: map near right down".into(),
             },
             "caption" => self.caption = line.splitn(2, ' ').nth(1).unwrap_or("").trim().to_string(),
-            "pause" => self.script.as_mut().unwrap().until = Some(std::time::Instant::now() + std::time::Duration::from_millis(n(1) as u64)),
+            "pause" => self.script.as_mut().unwrap().until = Some(hs_core::clock::now() + std::time::Duration::from_millis(n(1) as u64)),
             "settle" => self.script.as_mut().unwrap().settling = true,
             "crumb" => match self.ed.bar_spot(if w.get(1) == Some(&"layout") { hs_core::editor::BAR_LAYOUT } else { n(1) as i32 }) {
                 Some((x, y)) => queue = self.glide_click(x as f64, y as f64),
@@ -269,7 +269,7 @@ impl State {
             sc.queue.insert(k, q);
         }
         if sc.prof && w.first() == Some(&"move") {
-            sc.out.push_str(&format!("{line}  ({:.1} ms)\n", started.elapsed().as_secs_f64() * 1000.0));
+            sc.out.push_str(&format!("{line}  ({:.1} ms)\n", hs_core::clock::since(started).as_secs_f64() * 1000.0));
         }
         if w.first() == Some(&"prof") {
             sc.prof = true;

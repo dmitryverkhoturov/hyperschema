@@ -3,7 +3,9 @@
 An infinite board for thinking: notes, frames inside frames, arrows between
 them — and it stays smooth when the board gets huge.
 
-<!-- VIDEO: flight over 100 000 concepts -->
+![A generated board of 106 000 concepts, zoomed into one project](docs/hero.png)
+
+<!-- VIDEO: flight over 106 000 concepts -->
 
 I keep everything I think about on one board: projects, plans, research,
 a diary. On Excalidraw that board started to stutter at about 500
@@ -13,7 +15,7 @@ and links are first-class.
 
 ## What it does
 
-- **Huge boards stay smooth.** The video above flies over 100 000 concepts
+- **Huge boards stay smooth.** The flight video flies over 106 000 concepts
   and 64 000 links on a 2014 laptop. Each level of nesting is several times
   smaller than the one holding it, so the camera goes from the whole board
   down to a single note across six orders of magnitude.
@@ -41,10 +43,23 @@ Measured on a 2014 laptop: Intel HD 4400 + GeForce 840M, 60 Hz screen.
 The board is generated to look like a hand-made one
 (`cargo run --release -p hs-core --example gen_board -- 100000 big.hyperschema`).
 
-<!-- TABLE: filled in from bench-result.txt -->
+| Board | Concepts | Links | Load | Average | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Generated, 6 levels | 106 000 | 64 000 | 13 s | 52 fps | 17.3 ms | 28.5 ms | 63 ms |
+
+The occasional long frames on the big board are text being laid out again
+when the camera crosses a zoom level; that is the next thing to move off the
+frame.
+
+The videos in this README are rendered frame by frame
+(`--record out.mp4`: the app runs on a virtual clock and pipes each frame to
+ffmpeg), so they are smooth regardless of the machine. The numbers above are
+the real-time ones.
 
 Reproduce: `hyperschema big.hyperschema --tour --hud` flies the camera over
 the board, then writes `bench-result.txt` and a per-frame `bench-frames.csv`.
+Add `--record flight.mp4` to render the same flight as a video (needs
+`ffmpeg` on `PATH`).
 
 ## Build
 

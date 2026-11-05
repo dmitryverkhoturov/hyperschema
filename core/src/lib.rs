@@ -3,6 +3,7 @@
 //! the window and input.
 
 pub mod bench;
+pub mod clock;
 pub mod board;
 pub mod doc;
 pub mod editor;

@@ -268,7 +268,7 @@ impl Editor {
             shift: false,
             ui,
             touch,
-            caret_epoch: Instant::now(),
+            caret_epoch: crate::clock::now(),
             caret: 0,
             anchor: 0,
             text_drag: false,
@@ -296,7 +296,7 @@ impl Editor {
             ui_top: 0.0,
             bar_hits: Vec::new(),
             next_arrows: (false, true),
-            hover_at: Instant::now(),
+            hover_at: crate::clock::now(),
             sel_before: None,
         }
     }
@@ -533,7 +533,7 @@ impl Editor {
         if !std::mem::take(&mut self.drag_pending) {
             return;
         }
-        let t = Instant::now();
+        let t = crate::clock::now();
         match self.mode {
             Mode::Move { .. } => self.drag_move(),
             Mode::Resize { .. } => self.drag_resize(),
@@ -543,7 +543,7 @@ impl Editor {
         if let Some(p) = std::env::var_os("HS_PROF") {
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
-                let _ = writeln!(f, "drag {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+                let _ = writeln!(f, "drag {:.2} ms", crate::clock::since(t).as_secs_f64() * 1000.0);
             }
         }
     }
@@ -551,13 +551,13 @@ impl Editor {
     /// Selection, handles, things being dragged, caret, guides. Called once
     /// per frame, so it also applies a pending drag.
     pub fn refresh_overlay(&mut self) {
-        let started = Instant::now();
+        let started = crate::clock::now();
         self.refresh_overlay_inner();
         if self.trail.is_some() {
             if let Some(p) = std::env::var_os("HS_PROF") {
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
-                    let _ = writeln!(f, "frame {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
+                    let _ = writeln!(f, "frame {:.2} ms", crate::clock::since(started).as_secs_f64() * 1000.0);
                 }
             }
         }
@@ -682,7 +682,7 @@ impl Editor {
                         ov.rects.push(Rect { x: x0, y: slots[k].1, w: (x1 - x0).max(l.size * 0.25), h: lh, fill: blue(70), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
                         k = e + 1;
                     }
-                    if (self.caret_epoch.elapsed().as_millis() / 530) % 2 == 0 || self.text_drag {
+                    if (crate::clock::since(self.caret_epoch).as_millis() / 530) % 2 == 0 || self.text_drag {
                         let (x, y, _) = slots[self.caret.min(slots.len() - 1)];
                         ov.rects.push(Rect { x, y, w: (1.5 * px).max(l.size * 0.06), h: lh, fill: blue(255), stroke: 0, stroke_w: 0.0, radius: 0.0, shape: Shape::Rect });
                     }
@@ -760,7 +760,7 @@ impl Editor {
             self.edge_at = None;
             return;
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let dt = self.edge_at.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f64().min(0.05));
         self.edge_at = Some(now);
         self.engine.pan(vx * dt, vy * dt);
@@ -795,7 +795,7 @@ impl Editor {
             return;
         }
         t.tick();
-        let started = Instant::now();
+        let started = crate::clock::now();
         let (done, leaving) = (!t.animating(), t.leaving);
         if done && leaving {
             self.trail = None;
@@ -815,7 +815,7 @@ impl Editor {
         if let Some(p) = std::env::var_os("HS_PROF") {
             use std::io::Write;
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
-                let _ = writeln!(f, "slide {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
+                let _ = writeln!(f, "slide {:.2} ms", crate::clock::since(started).as_secs_f64() * 1000.0);
             }
         }
     }
@@ -884,7 +884,7 @@ impl Editor {
 
     /// How far the hover outline has thickened, 0..1 over 140 ms.
     fn hover_k(&self) -> f32 {
-        let t = (self.hover_at.elapsed().as_secs_f32() / 0.14).min(1.0);
+        let t = (crate::clock::since(self.hover_at).as_secs_f32() / 0.14).min(1.0);
         1.0 - (1.0 - t) * (1.0 - t)
     }
 
@@ -1061,7 +1061,7 @@ impl Editor {
         let fit = ((w as f64 / (b[2] - b[0]).max(1.0) as f64).min((h as f64 - self.ui_top as f64) / (b[3] - b[1]).max(1.0) as f64)) * 0.8;
         let s = cam.s.min(fit);
         let to = ((b[0] + b[2]) as f64 * 0.5, (b[1] + b[3]) as f64 * 0.5 - self.ui_top as f64 * 0.25 / s, s);
-        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: crate::trail::EASE_MS });
+        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: crate::clock::now(), ms: crate::trail::EASE_MS });
     }
 
     /// Middle of the path bar's link `k` in screen pixels (scripts tap it).
@@ -1243,13 +1243,13 @@ impl Editor {
         let fit = ((w as f64 / (b[2] - b[0]).max(1.0) as f64).min(h as f64 / (b[3] - b[1]).max(1.0) as f64)) * 0.8;
         let s = cam.s.clamp(14.0 * ui / font as f64, 32.0 * ui / font as f64).min(fit);
         let to = ((b[0] + b[2]) as f64 * 0.5, (b[1] + b[3]) as f64 * 0.5, s);
-        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: Instant::now(), ms: 450.0 });
+        self.flight = Some(Flight { from: (cam.cx, cam.cy, cam.s), to, start: crate::clock::now(), ms: 450.0 });
     }
 
     /// Moves the camera along a flight; called once per frame.
     fn fly(&mut self) {
         let Some(f) = &self.flight else { return };
-        let t = (f.start.elapsed().as_secs_f64() * 1000.0 / f.ms).min(1.0);
+        let t = (crate::clock::since(f.start).as_secs_f64() * 1000.0 / f.ms).min(1.0);
         let e = if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 };
         // Scale moves geometrically; the centre so that the screen point
         // of the target travels evenly.
@@ -1422,7 +1422,7 @@ impl Editor {
         };
         if new != self.hover {
             self.hover = new;
-            self.hover_at = Instant::now();
+            self.hover_at = crate::clock::now();
             return true;
         }
         false
@@ -1508,7 +1508,7 @@ impl Editor {
                     }
                     self.text_drag = true;
                 }
-                self.caret_epoch = Instant::now();
+                self.caret_epoch = crate::clock::now();
                 return;
             }
         }
@@ -1534,7 +1534,7 @@ impl Editor {
         let at = self.cursor;
         if double {
             if let Some((id, t)) = self.last_step.take() {
-                if self.path_active() && t.elapsed().as_millis() < 600 && self.board.get(&id).is_some() {
+                if self.path_active() && crate::clock::since(t).as_millis() < 600 && self.board.get(&id).is_some() {
                     self.flight = None;
                     self.start_text(TextTarget::Node(id), false);
                     return;
@@ -1980,7 +1980,7 @@ impl Editor {
                         t.step(&self.board, &id, undo_len);
                     }
                 }
-                self.last_step = Some((id, Instant::now()));
+                self.last_step = Some((id, crate::clock::now()));
                 self.after_step();
                 return;
             }
@@ -2120,7 +2120,7 @@ impl Editor {
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
     }
 
     /// A new connection drawn the way the last one was.
@@ -2269,7 +2269,7 @@ impl Editor {
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
         self.text_undo.clear();
         self.text_redo.clear();
     }
@@ -2295,7 +2295,7 @@ impl Editor {
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
     }
 
     // ------------------------------------------------------------ text
@@ -2319,7 +2319,7 @@ impl Editor {
             TextTarget::Node(id) => self.board.get(id).map(|n| (n.w, n.h)),
             TextTarget::Edge(_) => None,
         };
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
         self.caret = text.chars().count();
         self.anchor = self.caret;
         self.mode = Mode::Text { target, text, created };
@@ -2396,7 +2396,7 @@ impl Editor {
         let Mode::Text { text, .. } = &self.mode else { return };
         self.anchor = 0;
         self.caret = text.chars().count();
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
     }
 
     /// Caret movement and deletion keys while editing text.
@@ -2462,7 +2462,7 @@ impl Editor {
                 self.replace_range(from, to, "");
             }
         }
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
     }
 
     /// Remembers the text before an edit, one state per word or pause.
@@ -2470,13 +2470,13 @@ impl Editor {
         let Mode::Text { text, .. } = &self.mode else { return };
         let fresh = match self.text_last {
             None => true,
-            Some((at, del)) => at.elapsed().as_millis() > 900 || del != deleting || s.contains(char::is_whitespace),
+            Some((at, del)) => crate::clock::since(at).as_millis() > 900 || del != deleting || s.contains(char::is_whitespace),
         };
         if fresh && self.text_undo.last().is_none_or(|l| l.0 != *text) {
             self.text_undo.push((text.clone(), self.caret));
         }
         self.text_redo.clear();
-        self.text_last = Some((Instant::now(), deleting));
+        self.text_last = Some((crate::clock::now(), deleting));
     }
 
     /// Ctrl+Z / Ctrl+Y while typing.
@@ -2493,7 +2493,7 @@ impl Editor {
         self.set_text_raw(&t);
         self.caret = c.min(t.chars().count());
         self.anchor = self.caret;
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
     }
 
     /// Replaces characters `from..to` of the text being edited with `s` and
@@ -2571,7 +2571,7 @@ impl Editor {
         if !buf.is_empty() {
             self.insert(&buf);
         }
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
     }
 
     fn insert(&mut self, s: &str) {
@@ -2805,7 +2805,7 @@ impl Editor {
         self.text_box = self.board.get(&id).map(|n| (n.w, n.h));
         self.mode = Mode::Text { target: TextTarget::Node(id.clone()), text: String::new(), created: true };
         (self.caret, self.anchor) = (0, 0);
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
         self.rebuild();
         self.show(&id);
     }
@@ -2944,7 +2944,7 @@ impl Editor {
         board.fit_ancestors(&id, &one);
         self.board = board;
         self.sel = vec![id.clone()];
-        self.caret_epoch = Instant::now();
+        self.caret_epoch = crate::clock::now();
         self.mode = Mode::Text { target: TextTarget::Node(id), text: String::new(), created: false };
         self.rebuild();
     }
