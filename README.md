@@ -1,10 +1,16 @@
+
+https://github.com/user-attachments/assets/9a2f5eee-cde5-4ccb-aec1-44bf11749d28
 # Hyperschema
 
 ![A generated board of 106 000 concepts, zoomed into one project](docs/hero.png)
 
 An infinite board for notes and diagrams, for Windows and Android.
 
-<!-- VIDEO: flight over 106 000 concepts -->
+
+
+https://github.com/user-attachments/assets/746a6310-09a8-4141-81c1-d461548bb848
+
+
 
 ## Features
 
@@ -21,7 +27,11 @@ An infinite board for notes and diagrams, for Windows and Android.
 - **Excalidraw import**, including Obsidian `.excalidraw.md` files.
 - **Mouse, touchpad and touch.**
 
-<!-- VIDEO: path mode -->
+
+
+https://github.com/user-attachments/assets/30684fa1-ee5f-486b-bf0b-d7dc4734ec4a
+
+
 
 ## Screenshots
 
