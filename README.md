@@ -1,5 +1,3 @@
-
-https://github.com/user-attachments/assets/9a2f5eee-cde5-4ccb-aec1-44bf11749d28
 # Hyperschema
 
 ![A generated board of 106 000 concepts, zoomed into one project](docs/hero.png)
