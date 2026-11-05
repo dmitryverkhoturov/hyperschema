@@ -127,6 +127,23 @@ pub fn dev_run() -> bool {
     (*DEV_RUN.get().unwrap_or(&false) || harness().is_some()) && std::env::var_os("HS_SYNC").is_none()
 }
 
+/// What the app did with boards and the server, newest last, into
+/// %APPDATA%\Hyperschemapp.log (kept short). Local only, for finding faults.
+pub fn alog(msg: impl AsRef<str>) {
+    if dev_run() {
+        return;
+    }
+    use std::io::Write;
+    let p = data_dir().join("app.log");
+    if std::fs::metadata(&p).map(|m| m.len() > 200_000).unwrap_or(false) {
+        let _ = std::fs::rename(&p, data_dir().join("app.old.log"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = writeln!(f, "{t} {}", msg.as_ref());
+    }
+}
+
 /// Debug trace into %APPDATA%\Hyperschema\debug.log when HS_DEBUG is set.
 pub fn dlog(msg: String) {
     if std::env::var_os("HS_DEBUG").is_some() {

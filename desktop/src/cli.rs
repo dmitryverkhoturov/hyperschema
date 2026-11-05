@@ -36,8 +36,13 @@ fn data_dir() -> PathBuf {
     crate::data_dir()
 }
 
+/// The server connection the user entered in the menu ("Sync server…").
+pub fn config_path() -> PathBuf {
+    data_dir().join("server.json")
+}
+
 pub fn config() -> Option<Config> {
-    std::fs::read_to_string(data_dir().join("sync.json")).ok().and_then(|s| Config::parse(&s))
+    std::fs::read_to_string(config_path()).ok().and_then(|s| Config::parse(&s))
 }
 
 /// Windows GUI apps get no console; borrow the caller's when there is one.

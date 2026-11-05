@@ -1,6 +1,6 @@
 //! Boards: kept in this device's library (`%APPDATA%\Hyperschema\boards`,
 //! one Automerge document each, see core `library.rs`) and synced through
-//! the server when `sync.json` is set up. Saved by itself half a second
+//! the server when one is set up in the menu (`server.json`). Saved by itself half a second
 //! after each finished action (no Save button, no question on close).
 //! Files (`.hyperschema`, Excalidraw) are imported once into a new board
 //! and never written to; opening the same file again opens that board.
@@ -141,6 +141,7 @@ impl State {
     pub fn open_last(&mut self, old_file: Option<PathBuf>) {
         let last = std::fs::read_to_string(crate::data_dir().join("last-board.txt")).unwrap_or_default();
         let last = last.trim();
+        crate::alog(format!("start: last board {last:?}, exists {}, exe {:?}", self.lib.exists(last), std::env::current_exe().ok()));
         if !last.is_empty() && self.lib.exists(last) {
             let id = last.to_string();
             self.open_board(&id);
@@ -160,6 +161,7 @@ impl State {
         let live = match self.lib.load(id) {
             Ok(l) => l,
             Err(e) => {
+                crate::alog(format!("open {id} failed: {e}"));
                 crate::dlog(format!("open failed: {e}"));
                 return;
             }
@@ -184,6 +186,7 @@ impl State {
         self.name = live.name.clone();
         self.window.set_title(&self.name);
         self.live = Some(live);
+        crate::alog(format!("open {id}: server {}", crate::cli::config().is_some()));
         if !self.test_run() {
             let _ = std::fs::write(crate::data_dir().join("last-board.txt"), id);
             if let Some(cfg) = crate::cli::config() {
@@ -263,6 +266,7 @@ impl State {
         let _ = live.save();
         if let Some(s) = status {
             if s != self.sync_note {
+                crate::alog(format!("server: {}", s.as_deref().unwrap_or("ok")));
                 self.sync_note = s;
                 self.window.request_redraw();
             }
@@ -382,6 +386,35 @@ impl State {
         }
     }
 
+    /// Connects to a server with the connection text on the clipboard
+    /// (the same text the phone takes), or disconnects.
+    fn sync_menu(&mut self, h: f64) {
+        let on = crate::cli::config().is_some();
+        let mut items = vec![(1, hs_core::i18n::tr("Paste connection from clipboard", "Вставить подключение из буфера").into(), false)];
+        if on {
+            items.push((2, hs_core::i18n::tr("Disconnect", "Отключиться").into(), false));
+        }
+        let id = self.live.as_ref().map(|l| l.id.clone());
+        match crate::chrome::popup(0.0, h, &items) {
+            1 => {
+                let Some(text) = crate::clip::get() else { return };
+                if hs_core::couch::Config::parse(text.trim()).is_none() || std::fs::write(crate::cli::config_path(), text.trim()).is_err() {
+                    return;
+                }
+            }
+            2 => {
+                let _ = std::fs::remove_file(crate::cli::config_path());
+                self.cards.lock().unwrap().clear();
+            }
+            _ => return,
+        }
+        // Reopen the board so it talks to the server just set (or to none).
+        if let Some(id) = id {
+            self.open_board(&id);
+        }
+        self.fetch_cards();
+    }
+
     pub fn main_menu(&mut self) {
         let h = crate::chrome::strip_h();
         let mut items: Vec<(i32, String, bool)> = vec![(1, hs_core::i18n::tr("New board", "Новая схема").into(), false), (2, hs_core::i18n::tr("Open file…", "Открыть файл…").into(), false)];
@@ -400,7 +433,7 @@ impl State {
             }
             items.push((-1, String::new(), false));
         }
-        items.extend([(3, hs_core::i18n::tr("Add a board…", "Добавить схему…").into(), false), (4, hs_core::i18n::tr("Save a copy to a file…", "Сохранить копию в файл…").into(), false), (0, String::new(), false), (5, hs_core::i18n::tr("History…", "История…").into(), false), (0, String::new(), false), (6, hs_core::i18n::tr("Links to nested", "Связи с вложенными").into(), self.ed.show_nested_links)]);
+        items.extend([(3, hs_core::i18n::tr("Add a board…", "Добавить схему…").into(), false), (4, hs_core::i18n::tr("Save a copy to a file…", "Сохранить копию в файл…").into(), false), (0, String::new(), false), (5, hs_core::i18n::tr("History…", "История…").into(), false), (0, String::new(), false), (6, hs_core::i18n::tr("Links to nested", "Связи с вложенными").into(), self.ed.show_nested_links), (0, String::new(), false), (7, hs_core::i18n::tr("Sync server…", "Сервер синхронизации…").into(), crate::cli::config().is_some())]);
         match crate::chrome::popup(0.0, h, &items) {
             1 => self.new_board(),
             2 => self.open_dialog(),
@@ -412,6 +445,7 @@ impl State {
                 let _ = std::fs::write(crate::data_dir().join("show-nested-links.txt"), if self.ed.show_nested_links { "1" } else { "0" });
                 self.ed.rebuild();
             }
+            7 => self.sync_menu(h),
             i if i >= 100 => {
                 if let Some((id, name)) = boards.get((i - 100) as usize).cloned() {
                     if !self.lib.exists(&id) {

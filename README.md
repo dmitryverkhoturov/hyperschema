@@ -64,11 +64,11 @@ Automerge's job. Edits from another device show up within a second or two.
    {"url": "https://couch.example.com", "db": "hyperschema", "user": "…", "password": "…"}
    ```
 
-   Windows: save it as `%APPDATA%\Hyperschema\sync.json`. Android: menu →
-   *Sync server…*, paste it there.
+   On every device: menu → *Sync server…*. On Windows, copy the text and
+   choose *Paste connection from clipboard*; on Android, paste it there.
 
 The connection stays on the device; nothing about the server is built into
-the app. The command line (`hyperschema help`) uses the same file, so
+the app. The command line (`hyperschema help`) uses the same connection, so
 scripts and AI agents edit the same boards and their edits sync too.
 
 ## Performance

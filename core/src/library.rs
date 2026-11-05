@@ -266,14 +266,14 @@ impl Live {
                     if since.is_none() {
                         let seq = couch.seq()?;
                         for b in couch.pull_all(&board)? {
-                            let _ = tx.send(Event::Remote(b));
+                            tx.send(Event::Remote(b)).map_err(|_| "closed".to_string())?;
                         }
                         since = Some(seq);
                         wake();
                     }
                     let (got, last) = couch.wait(&board, since.as_ref().unwrap(), Duration::from_secs(50))?;
                     for b in got {
-                        let _ = tx.send(Event::Remote(b));
+                        tx.send(Event::Remote(b)).map_err(|_| "closed".to_string())?;
                     }
                     since = Some(last);
                     Ok(())
@@ -286,6 +286,7 @@ impl Live {
                         }
                         wake();
                     }
+                    Err(e) if e == "closed" => return,
                     Err(e) => {
                         was_down = true;
                         let _ = tx.send(Event::Status(Some(e)));
