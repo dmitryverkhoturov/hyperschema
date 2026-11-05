@@ -136,21 +136,23 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// At start: the board open last time; before the library existed, the
-    /// file open last time (imported once).
-    pub fn open_last(&mut self, old_file: Option<PathBuf>) {
+    /// At start: the board open last time; if it is gone, a board of this
+    /// device's library (one that is on the server first); with none, a new
+    /// empty board. Files are never imported on their own.
+    pub fn open_last(&mut self) {
         let last = std::fs::read_to_string(crate::data_dir().join("last-board.txt")).unwrap_or_default();
         let last = last.trim();
-        crate::alog(format!("start: last board {last:?}, exists {}, exe {:?}", self.lib.exists(last), std::env::current_exe().ok()));
+        crate::alog(format!("start: last board {last:?}, exists {}", self.lib.exists(last)));
         if !last.is_empty() && self.lib.exists(last) {
             let id = last.to_string();
             self.open_board(&id);
-        } else if let Some(p) = old_file.filter(|p| p.exists()) {
-            self.open(&p);
-        } else if let Some((id, _)) = self.lib.list().into_iter().next() {
-            self.open_board(&id);
-        } else {
-            self.new_board();
+            return;
+        }
+        let mut boards = self.lib.list();
+        boards.sort_by_key(|(id, _)| self.lib.meta(id)["pushed"].as_array().map_or(true, |a| a.is_empty()));
+        match boards.into_iter().next() {
+            Some((id, _)) => self.open_board(&id),
+            None => self.new_board(),
         }
     }
 

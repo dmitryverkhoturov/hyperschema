@@ -89,12 +89,6 @@ pub fn data_dir() -> PathBuf {
     base.join("Hyperschema")
 }
 
-fn last_file() -> Option<PathBuf> {
-    let p = std::fs::read_to_string(data_dir().join("last.txt")).ok()?;
-    let p = PathBuf::from(p.trim());
-    p.exists().then_some(p)
-}
-
 pub fn remember(path: &Path) {
     let _ = std::fs::create_dir_all(data_dir());
     let _ = std::fs::write(data_dir().join("last.txt"), path.to_string_lossy().as_bytes());
@@ -566,7 +560,7 @@ impl ApplicationHandler for App {
         } else {
             match self.args.file.clone() {
                 Some(p) => st.open(&p),
-                None => st.open_last(last_file()),
+                None => st.open_last(),
             }
             st.fetch_cards();
         }
