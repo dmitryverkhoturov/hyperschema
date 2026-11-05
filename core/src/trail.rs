@@ -4,7 +4,7 @@
 //! (an offset, and in the flat layouts a size too) and the editor shows a
 //! copy of the board with the poses applied.
 //!
-//! Layouts: "Карта" keeps real sizes and nesting (a moved parent carries
+//! Layouts: "Map" keeps real sizes and nesting (a moved parent carries
 //! what it holds); the flat ones draw everything out at one scale, the
 //! first link's, with nesting as plain parent -> child arrows and a frame
 //! out as a compact card with its title only.
@@ -45,10 +45,10 @@ impl Layout {
 
     pub fn name(self) -> &'static str {
         match self {
-            Layout::Map => "Карта",
-            Layout::Near => "Рядом",
-            Layout::Right => "Дерево →",
-            Layout::Down => "Дерево ↓",
+            Layout::Map => "Map",
+            Layout::Near => "Near",
+            Layout::Right => "Tree →",
+            Layout::Down => "Tree ↓",
         }
     }
 

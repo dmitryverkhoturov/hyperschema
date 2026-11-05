@@ -7,8 +7,8 @@ use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
-pub const W: u32 = 1600;
-pub const H: u32 = 900;
+pub const W: u32 = 1920;
+pub const H: u32 = 1080;
 pub const FPS: u32 = 60;
 
 pub struct Recorder {
@@ -21,7 +21,7 @@ impl Recorder {
     pub fn start(out: &str) -> std::io::Result<Recorder> {
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{W}x{H}"), "-r", &FPS.to_string(), "-i", "-"])
-            .args(["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out])
+            .args(["-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

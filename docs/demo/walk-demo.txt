@@ -13,7 +13,14 @@ caption Step to a neighbour, and on
 tap No secrets in history
 settle
 pause 1400
-tap Scan every commit
+tap Sync config stays local
+settle
+pause 1200
+caption Links cross branches: from Clean up over to Releases
+tap Android APK
+settle
+pause 1300
+tap Releases
 settle
 pause 1800
 caption Esc: everything slides home
@@ -33,6 +40,16 @@ tap Two videos
 settle
 pause 1300
 tap Walking the paths
+settle
+pause 1000
+tap Walks are remembered
+settle
+pause 1000
+caption Across again: from README to Next
+tap Projections
+settle
+pause 1300
+tap Next
 settle
 pause 1800
 caption Back to the start: what you looked at stays out

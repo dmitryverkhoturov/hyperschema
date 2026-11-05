@@ -496,7 +496,7 @@ pub extern "system" fn Java_com_hyperschema_app_Native_createCenter(_env: JNIEnv
 pub extern "system" fn Java_com_hyperschema_app_Native_stats(mut env: JNIEnv, _c: JClass, h: jlong) -> jstring {
     let a = app(h);
     let links = a.ed.board.edges.iter().filter(|e| e.kind == Kind::Link).count();
-    let msg = format!("{} концептов · {} связей", a.ed.board.nodes.len(), links);
+    let msg = format!("{} concepts · {} links", a.ed.board.nodes.len(), links);
     out(&mut env, Some(msg))
 }
 

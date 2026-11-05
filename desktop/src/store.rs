@@ -250,7 +250,7 @@ impl State {
             Ok(()) => self.name = live.name.clone(),
             Err(e) => {
                 crate::dlog(format!("save failed: {e}"));
-                self.name = format!("{} · не сохранено", live.name);
+                self.name = format!("{} · not saved", live.name);
                 self.save_at = Some(hs_core::clock::now() + Duration::from_secs(5));
             }
         }
@@ -311,7 +311,7 @@ impl State {
     }
 
     pub fn new_board(&mut self) {
-        let name = fresh_name(&self.lib, "Новая схема");
+        let name = fresh_name(&self.lib, "New board");
         match self.lib.create(&name, &Board::new()) {
             Ok(id) => self.open_board(&id),
             Err(e) => crate::dlog(format!("create failed: {e}")),
@@ -319,7 +319,7 @@ impl State {
     }
 
     pub fn open_dialog(&mut self) {
-        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).add_filter("Схемы", &[EXT, "excalidraw", "md"]).set_title("Открыть файл схемы").pick_file();
+        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).add_filter("Boards", &[EXT, "excalidraw", "md"]).set_title("Open a board file").pick_file();
         if let Some(p) = pick {
             Self::remember_dir(&p);
             self.open(&p);
@@ -341,8 +341,8 @@ impl State {
     pub fn import_dialog(&mut self) {
         let pick = rfd::FileDialog::new()
             .set_directory(self.dialog_dir())
-            .add_filter("Схемы", &[EXT, "excalidraw", "md", "json"])
-            .set_title("Добавить схему")
+            .add_filter("Boards", &[EXT, "excalidraw", "md", "json"])
+            .set_title("Add a board")
             .pick_file();
         let Some(src) = pick else { return };
         Self::remember_dir(&src);
@@ -375,7 +375,7 @@ impl State {
     /// itself stays in the library).
     pub fn export_dialog(&mut self) {
         let Some(live) = &self.live else { return };
-        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).set_file_name(format!("{}.{EXT}", live.name)).add_filter("Hyperschema", &[EXT]).set_title("Сохранить копию в файл").save_file();
+        let pick = rfd::FileDialog::new().set_directory(self.dialog_dir()).set_file_name(format!("{}.{EXT}", live.name)).add_filter("Hyperschema", &[EXT]).set_title("Save a copy to a file").save_file();
         if let Some(p) = pick {
             Self::remember_dir(&p);
             let _ = std::fs::write(&p, self.ed.board.serialize());
@@ -384,7 +384,7 @@ impl State {
 
     pub fn main_menu(&mut self) {
         let h = crate::chrome::strip_h();
-        let mut items: Vec<(i32, String, bool)> = vec![(1, "Новая схема".into(), false), (2, "Открыть файл…".into(), false)];
+        let mut items: Vec<(i32, String, bool)> = vec![(1, "New board".into(), false), (2, "Open file…".into(), false)];
         let mut boards = self.lib.list();
         for (id, name) in self.cards.lock().unwrap().iter() {
             if !boards.iter().any(|b| &b.0 == id) {
@@ -394,13 +394,13 @@ impl State {
         boards.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
         let open_id = self.live.as_ref().map(|l| l.id.clone());
         if !boards.is_empty() {
-            items.push((-2, "Схемы".into(), false));
+            items.push((-2, "Boards".into(), false));
             for (i, (id, name)) in boards.iter().enumerate() {
                 items.push((100 + i as i32, name.clone(), Some(id) == open_id.as_ref()));
             }
             items.push((-1, String::new(), false));
         }
-        items.extend([(3, "Добавить схему…".into(), false), (4, "Сохранить копию в файл…".into(), false), (0, String::new(), false), (5, "История…".into(), false), (0, String::new(), false), (6, "Связи с вложенными".into(), self.ed.show_nested_links)]);
+        items.extend([(3, "Add a board…".into(), false), (4, "Save a copy to a file…".into(), false), (0, String::new(), false), (5, "History…".into(), false), (0, String::new(), false), (6, "Links to nested".into(), self.ed.show_nested_links)]);
         match crate::chrome::popup(0.0, h, &items) {
             1 => self.new_board(),
             2 => self.open_dialog(),
@@ -487,9 +487,9 @@ impl State {
     /// Who made a change, for the timeline.
     fn who(&self, actor: &str) -> &'static str {
         if *actor == self.lib.actor.to_hex_string() {
-            "этот компьютер"
+            "this computer"
         } else {
-            "другое устройство"
+            "another device"
         }
     }
 
@@ -555,7 +555,7 @@ impl State {
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let menu_hover = matches!(crate::chrome::part_at(self.ed.cursor.x, self.ed.cursor.y), Some(crate::chrome::Part::Menu)) && self.cursor_in;
         let title = match &self.sync_note {
-            Some(_) => format!("{} · офлайн", self.name),
+            Some(_) => format!("{} · offline", self.name),
             None => self.name.clone(),
         };
         crate::chrome::draw(&mut ui, &title, menu_hover, ink);
@@ -574,11 +574,11 @@ impl State {
             let ty = y + (bh - size * hs_core::text::LINE_H) * 0.5;
             let count = match (sr.query.trim().is_empty(), sr.hits.len()) {
                 (true, _) => String::new(),
-                (false, 0) => "нет".to_string(),
-                (false, n) => format!("{} из {n}", sr.at + 1),
+                (false, 0) => "none".to_string(),
+                (false, n) => format!("{} of {n}", sr.at + 1),
             };
             let tx = x + 14.0 * s;
-            let shown = if sr.query.is_empty() { "Поиск по схеме".to_string() } else { sr.query.clone() };
+            let shown = if sr.query.is_empty() { "Search the board".to_string() } else { sr.query.clone() };
             let color = if sr.query.is_empty() { rgba(0, 0, 0, 90) } else { ink };
             let label = Label { x: tx, y: ty, w: bw - 110.0 * s, size, color, align: Align::Left, wrap: false, text: shown };
             if (hs_core::clock::since(self.started).as_millis() / 530) % 2 == 0 {
@@ -605,21 +605,21 @@ impl State {
             let r = 7.0 * s;
             ui.rects.push(Rect { x: kx - r, y: ty - r, w: 2.0 * r, h: 2.0 * r, fill: rgba(0x4a, 0x7d, 0xff, 255), stroke: rgba(255, 255, 255, 255), stroke_w: 2.0 * s, radius: 0.0, shape: Shape::Ellipse });
             let when = if t.pos == t.steps.len() {
-                "сейчас".to_string()
+                "now".to_string()
             } else {
                 let at = t.steps.get(t.pos).map_or(0, |c| c.t.max(0) as u64);
                 ago(now_ms().saturating_sub(at))
             };
             let dev = if t.pos < t.steps.len() { t.steps.get(t.pos).map(|c| format!(" · {}", self.who(&c.actor))).unwrap_or_default() } else { String::new() };
-            ui.labels.push(Label { x: x0, y: y + 10.0 * s, w: x1 - x0, size: 14.0 * s, color: ink, align: Align::Left, wrap: false, text: format!("История: шаг {} из {} — {when}{dev}", t.pos, t.steps.len()) });
+            ui.labels.push(Label { x: x0, y: y + 10.0 * s, w: x1 - x0, size: 14.0 * s, color: ink, align: Align::Left, wrap: false, text: format!("History: step {} of {} — {when}{dev}", t.pos, t.steps.len()) });
             let btn = |ui: &mut Scene, bx: f32, bw: f32, text: &str, primary: bool| {
                 let by = y + bh * 0.5 - 16.0 * s;
                 let (fill, color) = if primary { (rgba(0x4a, 0x7d, 0xff, 255), rgba(255, 255, 255, 255)) } else { (rgba(0, 0, 0, 14), ink) };
                 ui.rects.push(Rect { x: bx, y: by, w: bw, h: 32.0 * s, fill, stroke: 0, stroke_w: 0.0, radius: 6.0 * s, shape: Shape::Rect });
                 ui.labels.push(Label { x: bx, y: by + 7.0 * s, w: bw, size: 14.0 * s, color, align: Align::Center, wrap: false, text: text.into() });
             };
-            btn(&mut ui, w - 280.0 * s, 130.0 * s, "Восстановить", t.preview.is_some());
-            btn(&mut ui, w - 140.0 * s, 116.0 * s, "Закрыть", false);
+            btn(&mut ui, w - 280.0 * s, 130.0 * s, "Restore", t.preview.is_some());
+            btn(&mut ui, w - 140.0 * s, 116.0 * s, "Close", false);
         }
         self.demo_layer(&mut ui);
         self.ed.engine.set_ui(&ui);
@@ -685,12 +685,12 @@ impl State {
 fn ago(ms: u64) -> String {
     let m = ms / 60_000;
     if m < 1 {
-        "только что".into()
+        "just now".into()
     } else if m < 60 {
-        format!("{m} мин назад")
+        format!("{m} min ago")
     } else if m < 48 * 60 {
-        format!("{} ч назад", m / 60)
+        format!("{} h ago", m / 60)
     } else {
-        format!("{} дн назад", m / 1440)
+        format!("{} d ago", m / 1440)
     }
 }

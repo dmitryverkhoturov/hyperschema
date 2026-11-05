@@ -4,7 +4,7 @@
 //!
 //! Usage: hyperschema [file.hyperschema | file.excalidraw(.md)]
 //! Dev:   --bench N | --autobench | --tour [--hud] (file: camera tour, stats, exit) | --pointer (with --script) | --fullscreen | --vsync | --gpu low | --shot out.png [--cam x,y,scale]
-//!        --script steps.txt (see script.rs) | --record out.mp4 (with --tour or --script: render frame by frame, 1600x900 60 fps)
+//!        --script steps.txt (see script.rs) | --record out.mp4 (with --tour or --script: render frame by frame, 1920x1080 60 fps)
 
 #![windows_subsystem = "windows"]
 
@@ -348,7 +348,7 @@ impl State {
         let cpu_max = b.cpu.iter().cloned().fold(0.0, f32::max);
         let text_max = b.text.iter().cloned().fold(0.0, f32::max);
         let report = format!(
-            "{} — {} элементов — {}\nкадров {}, средний интервал {:.2} мс ({:.1} fps), p50 {:.2}, p95 {:.2}, p99 {:.2}, max {:.2} мс\nкадров >20 мс: {} ({:.1}%)\nCPU на кадр: среднее {:.2} мс, max {:.2} мс; пересборка текста max {:.2} мс\n",
+            "{} — {} elements — {}\nframes {}, mean interval {:.2} ms ({:.1} fps), p50 {:.2}, p95 {:.2}, p99 {:.2}, max {:.2} ms\nframes >20 ms: {} ({:.1}%)\nCPU per frame: mean {:.2} ms, max {:.2} ms; text rebuild max {:.2} ms\n",
             self.name,
             self.ed.engine.scene().element_count(),
             self.ed.engine.adapter_info,
@@ -534,7 +534,7 @@ impl ApplicationHandler for App {
         if let Some(n) = self.args.bench {
             st.ed.engine.set_scene(bench::generate(n));
             st.ed.engine.fit();
-            st.name = format!("тест {n} блоков");
+            st.name = format!("test {n} concepts");
         } else if self.args.tour {
             // Straight from the file: no library, nothing saved.
             let p = self.args.file.clone().unwrap_or_default();

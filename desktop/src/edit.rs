@@ -109,7 +109,7 @@ impl State {
         match self.ed.request.take() {
             Some(Request::NodeMenu { x, y }) => self.node_menu(x, y),
             Some(Request::CanvasMenu { x, y }) => {
-                let items = vec![(CANVAS_NEW, "Новый блок здесь".to_string(), false), (1, "Вставить\tCtrl+V".to_string(), false)];
+                let items = vec![(CANVAS_NEW, "New concept here".to_string(), false), (1, "Paste\tCtrl+V".to_string(), false)];
                 match self.menu_choice(x, y, &items) {
                     1 => self.paste(),
                     c => self.ed.apply_node_choice(c),
@@ -146,14 +146,14 @@ impl State {
     fn node_menu(&mut self, x: f64, y: f64) {
         let sel: Vec<_> = self.ed.sel.iter().filter_map(|id| self.ed.board.get(id).cloned()).collect();
         let Some(first) = sel.first() else { return };
-        let mut items = vec![(-2, "Цвет".to_string(), false)];
+        let mut items = vec![(-2, "Colour".to_string(), false)];
         for (k, (name, c)) in PALETTE.iter().enumerate() {
             items.push((NODE_COLOR + k as i32, name.to_string(), first.fill.as_deref() == *c));
         }
         items.push((-1, String::new(), false));
-        items.push((-2, "Форма".to_string(), false));
+        items.push((-2, "Shape".to_string(), false));
         let parent = sel.iter().any(|n| self.ed.board.has_children(&n.id));
-        for (k, (name, shape)) in [("Прямоугольник", NShape::Box), ("Овал", NShape::Ellipse), ("Ромб", NShape::Diamond), ("Текст без рамки", NShape::Text)].into_iter().enumerate() {
+        for (k, (name, shape)) in [("Rectangle", NShape::Box), ("Ellipse", NShape::Ellipse), ("Diamond", NShape::Diamond), ("Text only", NShape::Text)].into_iter().enumerate() {
             if shape == NShape::Text && parent {
                 continue;
             }
@@ -162,22 +162,22 @@ impl State {
         items.push((-1, String::new(), false));
         items.push((0, String::new(), false));
         if sel.len() == 1 {
-            items.push((NODE_EDIT, "Изменить текст\tEnter".to_string(), false));
+            items.push((NODE_EDIT, "Edit text\tEnter".to_string(), false));
             if self.ed.path_active() {
                 if self.ed.path_closable(&first.id) {
-                    items.push((NODE_CLOSE, "Убрать из пути".to_string(), false));
+                    items.push((NODE_CLOSE, "Remove from path".to_string(), false));
                 }
             } else {
-                items.push((NODE_PATH, "Путь по связям\tP".to_string(), false));
+                items.push((NODE_PATH, "Path along links\tP".to_string(), false));
             }
         }
-        items.push((NODE_DUPLICATE, "Дублировать\tCtrl+D".to_string(), false));
-        items.push((1, "Копировать\tCtrl+C".to_string(), false));
-        items.push((NODE_WRAP, "Обернуть в блок\tCtrl+G".to_string(), false));
+        items.push((NODE_DUPLICATE, "Duplicate\tCtrl+D".to_string(), false));
+        items.push((1, "Copy\tCtrl+C".to_string(), false));
+        items.push((NODE_WRAP, "Wrap in a concept\tCtrl+G".to_string(), false));
         items.push((0, String::new(), false));
-        items.push((NODE_DELETE, "Удалить\tDel".to_string(), false));
+        items.push((NODE_DELETE, "Delete\tDel".to_string(), false));
         if parent {
-            items.push((NODE_DELETE_DEEP, "Удалить с содержимым\tShift+Del".to_string(), false));
+            items.push((NODE_DELETE_DEEP, "Delete with contents\tShift+Del".to_string(), false));
         }
         match self.menu_choice(x, y, &items) {
             1 => self.copy(false),
@@ -189,13 +189,13 @@ impl State {
         {
             let Some(e) = self.ed.board.edge(&edge).cloned() else { return };
             let items = vec![
-                (1, "Без направления".to_string(), !e.arrow_from && !e.arrow_to),
-                (2, "→  Вперёд".to_string(), !e.arrow_from && e.arrow_to),
-                (3, "←  Назад".to_string(), e.arrow_from && !e.arrow_to),
-                (4, "↔  В обе стороны".to_string(), e.arrow_from && e.arrow_to),
+                (1, "No direction".to_string(), !e.arrow_from && !e.arrow_to),
+                (2, "→  Forward".to_string(), !e.arrow_from && e.arrow_to),
+                (3, "←  Back".to_string(), e.arrow_from && !e.arrow_to),
+                (4, "↔  Both ways".to_string(), e.arrow_from && e.arrow_to),
                 (0, String::new(), false),
-                (5, "Подпись…".to_string(), false),
-                (6, "Удалить связь".to_string(), false),
+                (5, "Label…".to_string(), false),
+                (6, "Delete link".to_string(), false),
             ];
             let choice = self.menu_choice(x, y, &items);
             self.ed.apply_edge_choice(&edge, choice);

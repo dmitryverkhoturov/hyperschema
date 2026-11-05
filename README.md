@@ -45,10 +45,11 @@ The board is generated to look like a hand-made one
 
 | Board | Concepts | Links | Load | Average | p50 | p95 | p99 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Generated, 6 levels | 106 000 | 64 000 | 13 s | 52 fps | 17.3 ms | 28.5 ms | 63 ms |
+| Generated, 6 levels | 106 000 | 64 000 | 13 s | 57 fps | 17.2 ms | 19.2 ms | 23.6 ms |
 
-The occasional long frames on the big board are text being laid out again
-when the camera crosses a zoom level; that is the next thing to move off the
+The same 14-second flight as in the video, in real time. About 3% of frames
+take longer than 20 ms, the worst one 0.3 s: text being laid out again when
+the camera crosses a zoom level; that is the next thing to move off the
 frame.
 
 The videos in this README are rendered frame by frame
@@ -82,8 +83,8 @@ The Windows build is `target/dist/hyperschema.exe`. Android:
 - `android/`, `shell-android/` — Android shell (Kotlin) over the same core.
 - `docs/demo/` — the board and script behind the path-mode video.
 
-The interface is in Russian for now; English is next.
 
 ## License
 
-<!-- LICENSE: to be chosen -->
+[GPL-3.0](LICENSE). Text is drawn with the system font (Segoe UI on Windows,
+Roboto or Noto Sans on Android); no fonts are bundled.

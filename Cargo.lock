@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "hs-android"
-version = "0.1.0"
+version = "0.8.4"
 dependencies = [
  "hs-core",
  "jni 0.21.1",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "hs-core"
-version = "0.1.0"
+version = "0.8.4"
 dependencies = [
  "ab_glyph",
  "automerge",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "hyperschema"
-version = "0.1.0"
+version = "0.8.4"
 dependencies = [
  "embed-resource",
  "hs-core",

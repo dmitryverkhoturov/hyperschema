@@ -27,6 +27,7 @@ pub struct Tour {
 }
 
 const RHO: f64 = 1.4;
+const TOTAL_SECS: f64 = 14.0;
 
 impl Tour {
     /// Plans a tour of `stops` notes on a `w` x `h` screen.
@@ -94,6 +95,13 @@ impl Tour {
             // A pause on each note.
             if b.w < whole.w * 1e-3 {
                 legs.push(Leg { a: b, b, secs: 1.4 });
+            }
+        }
+        // The whole flight takes TOTAL_SECS: a quick look, not a slow drift.
+        let sum: f64 = legs.iter().map(|l| l.secs).sum();
+        if sum > 0.0 {
+            for l in &mut legs {
+                l.secs *= TOTAL_SECS / sum;
             }
         }
         Tour { legs, start: hs_core::clock::now() }

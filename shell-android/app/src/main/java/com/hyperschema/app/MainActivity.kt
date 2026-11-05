@@ -189,7 +189,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
         // Search: a field with the match count, previous, next, close.
         searchField = EditText(this).apply {
-            hint = "Поиск по схеме"
+            hint = "Search the board"
             textSize = 15f
             background = null
             isSingleLine = true
@@ -347,7 +347,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     }
 
     private fun showTitle() {
-        title.text = if (offline) "$boardName · офлайн" else boardName
+        title.text = if (offline) "$boardName · offline" else boardName
     }
 
     private fun readText(u: Uri): String? =
@@ -357,7 +357,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private fun readIntent(intent: Intent?): Boolean {
         if (intent?.action == Intent.ACTION_SEND) {
             intent.getStringExtra(Intent.EXTRA_TEXT)?.let { t ->
-                whenReady { takeText(t, "Новая схема") }
+                whenReady { takeText(t, "New board") }
                 return true
             }
         }
@@ -436,16 +436,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     private fun save() {
         if (handle == 0L || boardId == null) return
-        if (!Native.saveBoard(handle)) title.text = "$boardName · не сохранено"
+        if (!Native.saveBoard(handle)) title.text = "$boardName · not saved"
     }
 
     /** This phone's boards and the server's. */
     private fun pickBoard() {
         if (handle == 0L) return
         val rows = Native.boards(handle).split('\n').filter { it.isNotBlank() }.map { it.split('\t') }
-        val names = rows.map { if (it.getOrNull(2) == "1") "• ${it[1]}" else it[1] } + "Новая схема"
+        val names = rows.map { if (it.getOrNull(2) == "1") "• ${it[1]}" else it[1] } + "New board"
         android.app.AlertDialog.Builder(this)
-            .setTitle("Схемы")
+            .setTitle("Boards")
             .setItems(names.toTypedArray()) { _, k ->
                 if (k < rows.size) openBoard(rows[k][0]) else newBoard()
             }
@@ -454,24 +454,24 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     private fun newBoard() {
         val names = Native.boards(handle).split('\n').map { it.split('\t').getOrElse(1) { "" } }.toSet()
-        var n = "Новая схема"
+        var n = "New board"
         var k = 2
-        while (n in names) n = "Новая схема ${k++}"
+        while (n in names) n = "New board ${k++}"
         takeText("", n)
     }
 
     /** Asks for the connection string (the contents of sync.json). */
     private fun connectDialog() {
         val input = EditText(this).apply {
-            hint = "Строка подключения"
+            hint = "Connection string"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             clipboard().primaryClip?.getItemAt(0)?.text?.toString()?.takeIf { it.contains("\"password\"") }?.let { setText(it) }
         }
         android.app.AlertDialog.Builder(this)
-            .setTitle("Сервер синхронизации")
+            .setTitle("Sync server")
             .setView(input)
-            .setPositiveButton("Сохранить") { _, _ -> takeText(input.text.toString(), "") }
-            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Save") { _, _ -> takeText(input.text.toString(), "") }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -479,13 +479,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     private fun showMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
-        m.menu.add(0, 1, 0, "Схемы…")
-        m.menu.add(0, 2, 1, "Новая схема")
-        m.menu.add(0, 6, 2, "Открыть файл…")
-        m.menu.add(0, 3, 3, "Вписать всё")
-        m.menu.add(0, 4, 4, "Связи с вложенными").isCheckable = true
-        if (clipboard().hasPrimaryClip() && Native.editable(handle)) m.menu.add(0, 5, 5, "Вставить")
-        m.menu.add(0, 7, 6, "Сервер синхронизации…")
+        m.menu.add(0, 1, 0, "Boards…")
+        m.menu.add(0, 2, 1, "New board")
+        m.menu.add(0, 6, 2, "Open file…")
+        m.menu.add(0, 3, 3, "Fit all")
+        m.menu.add(0, 4, 4, "Links to nested").isCheckable = true
+        if (clipboard().hasPrimaryClip() && Native.editable(handle)) m.menu.add(0, 5, 5, "Paste")
+        m.menu.add(0, 7, 6, "Sync server…")
         m.menu.findItem(4).isChecked = nestedLinks()
         m.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -630,11 +630,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
     private fun showSelBar(s: List<Float>) {
         if (barKind != "sel") {
             bar.removeAllViews()
-            bar.addView(barButton("Текст", false) { Native.editSelected(handle) }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(barButton("Путь", false) { Native.nodeChoice(handle, NODE_PATH) }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(barButton("Цвет", false) { pickingColor = true }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(plainButton("Форма") { shapeMenu(it) }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(plainButton("Ещё") { moreMenu(it) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Text", false) { Native.editSelected(handle) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Path", false) { Native.nodeChoice(handle, NODE_PATH) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Colour", false) { pickingColor = true }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(plainButton("Shape") { shapeMenu(it) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(plainButton("More") { moreMenu(it) }, LinearLayout.LayoutParams(-2, -1))
             barKind = "sel"
         }
         placeBar((s[0] + s[2]) / 2, s[1], s[3])
@@ -672,7 +672,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     private fun shapeMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
-        val names = listOf("Прямоугольник", "Овал", "Ромб", "Текст без рамки")
+        val names = listOf("Rectangle", "Ellipse", "Diamond", "Text only")
         for (k in names.indices) {
             if (k == 3 && style[2] == 1) continue
             m.menu.add(0, NODE_SHAPE + k, k, names[k]).isCheckable = true
@@ -684,11 +684,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
 
     private fun moreMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
-        m.menu.add(0, NODE_DUPLICATE, 0, "Дублировать")
-        m.menu.add(0, 1, 1, "Копировать")
-        m.menu.add(0, NODE_WRAP, 2, "Обернуть в блок")
-        m.menu.add(0, NODE_DELETE, 3, "Удалить")
-        if (style[2] == 1) m.menu.add(0, NODE_DELETE_DEEP, 4, "Удалить с содержимым")
+        m.menu.add(0, NODE_DUPLICATE, 0, "Duplicate")
+        m.menu.add(0, 1, 1, "Copy")
+        m.menu.add(0, NODE_WRAP, 2, "Wrap in a concept")
+        m.menu.add(0, NODE_DELETE, 3, "Delete")
+        if (style[2] == 1) m.menu.add(0, NODE_DELETE_DEEP, 4, "Delete with contents")
         m.setOnMenuItemClickListener {
             if (it.itemId == 1) copySelection() else call { Native.nodeChoice(handle, it.itemId) }
             true
@@ -749,8 +749,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
         val n = r[1].toInt()
         searchCount.text = when {
             q.isBlank() -> ""
-            n == 0 -> "нет"
-            else -> "${r[0].toInt() + 1} из $n"
+            n == 0 -> "none"
+            else -> "${r[0].toInt() + 1} of $n"
         }
     }
 
@@ -774,8 +774,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback, Choreographer.FrameCall
             bar.addView(barButton("→", !from && to) { Native.edgeChoice(handle, 2) }, LinearLayout.LayoutParams(-2, -1))
             bar.addView(barButton("←", from && !to) { Native.edgeChoice(handle, 3) }, LinearLayout.LayoutParams(-2, -1))
             bar.addView(barButton("↔", from && to) { Native.edgeChoice(handle, 4) }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(barButton("Подпись", false) { Native.edgeChoice(handle, 5) }, LinearLayout.LayoutParams(-2, -1))
-            bar.addView(barButton("Удалить", false) { Native.edgeChoice(handle, 6) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Label", false) { Native.edgeChoice(handle, 5) }, LinearLayout.LayoutParams(-2, -1))
+            bar.addView(barButton("Delete", false) { Native.edgeChoice(handle, 6) }, LinearLayout.LayoutParams(-2, -1))
             barKind = kind
         }
         val x = m[0].toFloat()

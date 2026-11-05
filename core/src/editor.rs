@@ -38,14 +38,14 @@ pub enum Request {
 
 /// Fill colours offered for concepts (none first): name, colour.
 pub const PALETTE: [(&str, Option<&str>); 8] = [
-    ("Без заливки", None),
-    ("Серый", Some("#e9ecef")),
-    ("Красный", Some("#ffc9c9")),
-    ("Оранжевый", Some("#ffd8a8")),
-    ("Жёлтый", Some("#fff3bf")),
-    ("Зелёный", Some("#b2f2bb")),
-    ("Голубой", Some("#a5d8ff")),
-    ("Фиолетовый", Some("#d0bfff")),
+    ("No fill", None),
+    ("Grey", Some("#e9ecef")),
+    ("Red", Some("#ffc9c9")),
+    ("Orange", Some("#ffd8a8")),
+    ("Yellow", Some("#fff3bf")),
+    ("Green", Some("#b2f2bb")),
+    ("Blue", Some("#a5d8ff")),
+    ("Violet", Some("#d0bfff")),
 ];
 
 /// Menu choices: `NODE_COLOR + k` picks `PALETTE[k]`, `NODE_SHAPE + k`
@@ -900,7 +900,7 @@ impl Editor {
         self.trail.as_ref().is_some_and(|t| !t.leaving)
     }
 
-    /// "Путь": starts walking from the selected concept (one of the last
+    /// "Path": starts walking from the selected concept (one of the last
     /// walk's links brings that walk back).
     pub fn path_enter(&mut self) {
         self.commit_text();
@@ -996,7 +996,7 @@ impl Editor {
         }
     }
 
-    /// "Убрать из пути": a concept out goes back to its place.
+    /// "Remove from path": a concept out goes back to its place.
     pub fn path_close(&mut self, id: &str) {
         self.commit_text();
         let Some(t) = self.trail.as_mut().filter(|t| !t.leaving) else { return };
@@ -1083,7 +1083,7 @@ impl Editor {
         let ink = rgba(0x2a, 0x2a, 0x2a, 255);
         let name = |id: &str| {
             let t = self.board.get(id).map_or(String::new(), |n| n.text.split('\n').next().unwrap_or("").trim().to_string());
-            let t = if t.is_empty() { "без названия".to_string() } else { t };
+            let t = if t.is_empty() { "untitled".to_string() } else { t };
             if t.chars().count() > 18 {
                 format!("{}…", t.chars().take(17).collect::<String>())
             } else {
